@@ -1,0 +1,117 @@
+---
+title: "01b_aCA_GEOdownload"
+author: "Amy Inkster"
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+In this script we will download the data associated with the acute chorioamnionitis dataset from its public data-sharing location on the Gene Expression Omnibus (GEO) website. 
+
+
+
+1. TO START: please visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE115508 
+
+2. Scroll all the way to the bottom of the screen to the table of Supplementary Files.
+
+3. GSE115508_RAW.tar is in the first row, in the Download column of the first row, click "(http)" to download and save the compressed (TAR'd) IDAT files
+
+4. Navigate to the file location on your local computer where the GSE115508_RAW.tar file is saved. 
+
+5. We need to decompress (untar) this file using the following code:
+
+```{r}
+
+# EDIT to reflect your local path
+# this will extract a bunch of IDATs into the same path
+untar(tarfile = "Z:/7_ExternalData/GSE115508/GSE115508_RAW.tar",
+      exdir = "Z:/7_ExternalData/GSE115508/")
+
+# this step takes a long time! 
+
+```
+
+
+6. Once all IDATs extracted that are still compressed at one more level. Currently they are .IDAT.gz files, we need to extract (unzip) once more.
+
+```{r}
+
+# EDIT to your local path
+
+idats <- list.files(path="Z:/7_ExternalData/GSE115508/", pattern=".idat.gz$", full.names=TRUE)
+length(idats) # should be 158 (79*2)
+
+library(GEOquery)
+sapply(idats, unzip, overwrite = TRUE)
+
+# this also takes a very long time!
+
+```
+
+7. Now we can read in the IDATs to an rgset in R.
+
+```{r}
+
+library(minfi)
+
+rgset <- read.metharray.exp("Z:/7_ExternalData/GSE115508/")
+
+# read data into rgset, this step ALSO takes a long time! 
+# normal for several warnings - it is still working.
+# apparently the package developer (Kasper D Hansen) is not quite sure why
+# the warnings happen but is working on it
+# see issue here: https://github.com/hansenlab/minfi/issues/218 
+
+```
+
+
+8. Check rgset and do some basic exploration of the data object.
+
+```{r}
+
+rgset 
+
+# basic exploration of the rgset
+# use the functions below...how many probes and samples are in this rgset?
+str(rgset)
+rgset
+
+annotation(rgset) # should be the b4 annotation 
+
+# what is stored in the rows and columns?
+head(colnames(rgset))
+head(rownames(rgset))
+
+```
+
+
+9. Finally, read in the metadata (I am sending this to you via email, just easier than parsing with GEO and all the metadata is publicly available so it is allowable to email).
+
+```{r}
+
+# EDIT to local path
+# this is the Series data (.txt) that's included in every GEO study
+pDat <- read.csv("Z:/7_ExternalData/GSE115508/GSE115508_pData.csv")
+
+# make sure that the same samples are present in the same order in both rgset and pdata
+all.equal(pDat$Sample_ID, colnames(rgset)) # must be TRUE before proceeding
+
+```
+
+10. Now save the rgset in your local directory, 
+
+```{r}
+
+# EDIT to local path
+saveRDS(rgset, file = "Z:/7_ExternalData/GSE115508/GSE115508_rgset.rds")
+
+```
+
+
+
+11. At this point, you can delete all the IDAT, GZ, and TAR files at this point. They are large and too big to store long-term. Not to mention the data will always be on GEO if you need to redownload it at any point in the future (this is jsut a best-practice step, to avoid having too many large files kicking around).
+
+
+Great! We will go over this code at our next Monday meeting. Next, we will use the rgset to move onto probe filtering and sample QC.
+
+

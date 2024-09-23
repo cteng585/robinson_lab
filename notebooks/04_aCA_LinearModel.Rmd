@@ -1,0 +1,307 @@
+---
+title: "04_aCA_LinearModel"
+author: "Amy Inkster"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+## 0.0 Set up
+
+
+```{r setup, include=FALSE}
+
+library(tidyverse)
+library(minfi)
+library(limma) # will need to install
+library(lumi) # will need to install
+library(biobroom) # will need to install
+library(IlluminaHumanMethylationEPICmanifest)
+
+#  again i always use the first chunk to load a probe annotation object if im working with illumina dname data
+probeInfo <- as.data.frame(cbind(IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Locations, 
+                                 IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Other, 
+                                 IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Manifest)) # 865859 by 30
+probeInfo$probeID <- rownames(probeInfo)
+chrXprobes <- probeInfo %>% filter(chr == "chrX") # 19090
+chrYprobes <- probeInfo %>% filter(chr == "chrY") # 537
+autoProbes <- probeInfo %>% filter(!(chr %in% c("chrX", "chrY")))
+```
+
+
+## 1.0 Load data
+
+In this section we are going to load the data that you saved at the end of script 03_aCA_QCandProbeFiltering.Rmd
+
+```{r}
+
+pDat <- readRDS("/path_to_local_dest/pDat_filt.rds") 
+betas <- readRDS("/path_to_local_dest/betas_filt.rds") 
+
+# sanity check to make sure the samples are still in the same order
+all.equal(pDat$Sample_ID, colnames(betas))
+
+```
+
+## 2.0 Remove XTR probes
+
+The XTR (X transposed region) is a human-specific region arising from an X to Y transposition that did occured after human-chimpanzee divergence. This resulted in a large region on Xq21 being almost 99% identical in sequence to a region on Yp. Although this sequence is very similar between the X and Y chromosomes it does not appear to participate in crossing over (making it distinct from the PAR regions, although in some papers I have heard this referred to as "PAR3" - but they are referring to it that way due to its property of XY sequence similarity only, not crossing-over behaviour). 
+
+```{r}
+
+# check how many chrX and chrY probes are within PAR3
+par3_x <- chrXprobes %>% filter(pos > 88400000 & pos < 92000000) # 25
+par3_y <- chrYprobes %>% filter(pos > 3440000 & pos < 5750000) # 13
+
+# and remove these from your beta values object
+betas <- betas[!(rownames(betas) %in% par3_x$probeID), ]
+
+```
+
+
+## 3.0 Linear modelling
+
+In this section we are going to approach linear modelling. We will test for differentially methylated CpG sites on the X chromosome that differ between aCA and non-aCA placentas. We are going to run linear models separately as X chromosome DNAme differs by sex.
+
+I was considering running a PCA analysis first to identify covariates that we should adjust for in the analysis, but the code is long and bulky and you don't have much time left in your rotation.
+
+Instead, we will use Chaini's paper, which says "we modeled DNAm as a function of aCA status with GA, fetal sex, and ancestry included as additive covariates". To match this we will adjust for gestational age and ancestry. Fetal sex is taken care of by doing sex-stratified analyses.
+
+In statistics speak, that means our linear model will look like:
+ 
+ DNAme ~ aCA + GA + ancestry
+ 
+Which means we are looking for patterns of DNAme that depend on aCA status, when accounting for the effects of GA and ancestry.
+
+The one thing to remember is that we have to convert our DNAme beta values into DNAme M values. M values are log-transformed beta values, and we use these for analysis as the log transformation makes the M values more normally distributed, which is one of the assumptions of linear models.
+
+### 3.1 Set up data 
+
+```{r}
+
+dim(betas)
+
+# remove any NAs
+betas <- na.omit(betas)
+dim(betas)
+
+# now, we'll need to create separate metadata for males/females
+pDat_f <- pDat %>% filter(Sex %in% c("F"))
+pDat_m <- pDat %>% filter(Sex %in% c("M"))
+
+# split M values based on this
+betas_f <- betas[ , pDat_f$Sample_ID]
+betas_m <- betas[ , pDat_m$Sample_ID]
+
+# finally, let's select only chrX probes to start
+betas_fx <- betas_f[rownames(betas_f) %in% chrXprobes$probeID, ]
+dim(betas_fx)
+
+betas_mx <- betas_m[rownames(betas_m) %in% chrXprobes$probeID, ]
+dim(betas_mx)
+
+# now convert to mvals
+mvals_fx <- lumi::beta2m(betas_fx)
+dim(mvals_fx)
+
+mvals_mx <- lumi::beta2m(betas_mx)
+dim(mvals_mx)
+
+```
+
+### 3.2 Set up model
+
+```{r}
+
+# specify design matrix (the thing we outlined above, DNAme ~ aCA + GA + Ancestry)
+# the design matrix outlines these variables and how they are assigned to each
+# sample in our dataset in a format that the linear model can use later
+mod_aCA <- model.matrix(~ Group +
+                          GA,
+                        # + Prob_Caucasian + Prob_Asian + Row,
+                          pDat_f, 
+                        row.names=T)
+head(mod_aCA)
+
+```
+
+### 3.3 Run model
+
+```{r}
+
+# fit the linear model on the m values & calculate empirical bayesian statistics
+fit_aCA <- lmFit(mvals_fx, mod_aCA) %>% eBayes() 
+
+# biobroom is a package that makes the output of a linear model
+# more organized and easier to work with, like a statistics tidyverse
+td_aCA <- biobroom::tidy.MArrayLM(fit_aCA) # throws a tibble warning, still works
+head(td_aCA)
+
+# now, we have the test statistics for each CpG, but need to calculate the 
+# delta beta (or how much the CpG's DNAme differs between aCA and non-aCA)
+# this is a bit weird but the easiest way to do this other than manually is 
+# to take advantange of a linear model run on beta values, and ONLY take the effect
+# size estimates from it, without taking any of the test statistics
+# the test statistics are calculated from the effect size, so this is not an output
+# of a linear model we are taking, it's the input actually and so the betas
+# being non-normally distributed is fine if we don't listen to any results from a 
+# linear model run on them
+
+# this is preferred over manually calculating mean and difference od each CpG 
+# between your groups as it is very lengthy and easy to make a coding error in
+# taking that approach
+td_aCA <- td_aCA %>% mutate(delB =
+                              (biobroom::tidy.MArrayLM(lmFit(betas_fx, mod_aCA) 
+                                                       %>% eBayes()))$estimate)
+head(td_aCA) # new column "delB" shows aCA vs non-aCA average beta val diff
+
+# in the above linear model the "term" column says Group_nonchorioamnionitis
+# this means that chorioamnionitis is our reference level and any delta betas
+# refer to how the beta changes from aCA to non-aCA. So a delB of +0.26 would mean
+# that non-aCA cases have 0.26 higher DNAme beta values at that CpG than aCA cases, on average
+
+# now, we have to multiple test correct the p values for the number of tests we ran
+td_aCA <- td_aCA %>% 
+  dplyr::rename(probeID = gene) %>% #biobroom assumes tested genes, not CpGs, rename
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="fdr")) %>%
+  ungroup() %>%
+  as.data.frame()
+
+```
+
+
+## 4.0 Investigate Output
+
+### 4.1 p value distribution
+
+```{r}
+
+head(td_aCA)
+
+# let's look at a p value distribution
+# if there is a significant effect we expect a peak below 0.05
+# example here https://www.google.com/url?sa=i&url=http%3A%2F%2Fvarianceexplained.org%2Fstatistics%2Finterpreting-pvalue-histogram%2F&psig=AOvVaw3ibZaIFLljh3T0Xpsrr3pp&ust=1635728441234000&source=images&cd=vfe&ved=0CAsQjRxqFwoTCLjR6be58_MCFQAAAAAdAAAAABAD 
+
+qplot(td_aCA$p.value)
+
+# when there is no significant effect of aCA we'd expect a uniform p value distribution
+# i.e. no left peak 
+
+```
+
+### 4.2 How many hits?
+
+```{r}
+
+# to create a table of how many hits are significant at a few FDR levels
+# fill in a table that is organized like the following, with 2 columns and 3 rows
+
+##                FDR < 0.05      FDR < 0.01
+
+# delB > 0 
+
+# delB > 0.05
+
+# delB > 0.1
+
+
+# to fill in the values in the table above, how many rows do these have?
+dim(td_aCA %>% filter(fdr<0.05))
+dim(td_aCA %>% filter(fdr<0.01))
+
+dim(td_aCA %>% filter(fdr<0.05 & abs(delB) > 0.05))
+dim(td_aCA %>% filter(fdr<0.01 & abs(delB) > 0.05))
+
+dim(td_aCA %>% filter(fdr<0.05 & abs(delB) > 0.1))
+dim(td_aCA %>% filter(fdr<0.01 & abs(delB) > 0.1))
+
+```
+
+### 4.3 Add gene info
+
+Remember all information about which probes are located in which genes is stored in the chrXprobes annotation object. We will join soe information from that object to our linear modleling results, and then subset to 
+
+```{r}
+
+td_aCA <- td_aCA %>% left_join(chrXprobes %>% dplyr::select(
+  chr, 
+  pos,
+  UCSC_RefGene_Name, 
+  Regulatory_Feature_Group, 
+  UCSC_RefGene_Group,
+  HMM_Island,
+  probeID
+))
+
+```
+
+### 4.4 Subset to significant hits
+
+Now let's subset to only things that are FDR significant (fdr < 0.05) with a delta beta of at least 0.05 (positive or negative.)
+
+```{r}
+
+femalex_hits <- td_aCA %>% filter(fdr<0.05 & abs(delB) > 0.05)
+
+# what genes are these hits in?
+
+```
+
+## 5.0 Boxplot
+
+How to make a boxplot of significant differentially methylated hits
+
+```{r}
+
+# if there is only one hits the drop=F prevents this subset
+# from turning the result into a vector, it keeps it as a dataframe
+# drop means drop extra dimensions (so set to false)
+hits <- betas_fx[rownames(betas_fx) %in% femalex_hits$probeID, , drop=F] %>% as.data.frame()
+
+hits <- rownames_to_column(hits, var="probeID")
+
+# now we need this in long format to plot
+hits_plot <- pivot_longer(hits, 2:ncol(hits), 
+                          names_to = "Sample_ID", 
+                          values_to = "beta")
+head(hits_plot)
+
+# attach the metadata
+hits_plot <- hits_plot %>% left_join(pDat_f)
+head(hits_plot)
+
+# now plot this! 
+# if there is more than one probe, can add a step before plotting where you 
+# take hits_plot %>% filter(probeID %in% c("cgXXXXX")) %>% ggplot()...
+hits_plot %>%
+
+  ggplot(aes(x=Group, y=beta, color=Group)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(position=position_jitterdodge())
+
+# include these boxplots in your powerpoint presentation, as well as any information
+# from the femalex_hits object about what genes/genomic regions these are in
+
+# can look up the genes and see if they are immune-related, etc!
+
+
+```
+
+
+
+
+## 6.0 Volcano plot
+
+```{r}
+
+td_aCA %>%
+  ggplot(aes(x=delB, y=-log10(fdr))) + 
+  geom_point() +
+  geom_vline(xintercept=c(-0.05,0.05), color = "grey22", linetype = "dashed") +  # add delta beta and FDR intercepts to make easier to read
+  geom_hline(yintercept=c(-log10(0.05)), color = "grey22", linetype="dashed") 
+
+```
+
+

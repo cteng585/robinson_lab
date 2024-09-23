@@ -1,0 +1,460 @@
+---
+title: "03 Preliminary Processing"
+output: html_document
+---
+
+## 0.0 Load required packages
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ewastools)
+library(minfi)
+
+
+
+
+# NEW WEEK 2 PACKAGES
+library(planet) # install with BiocManager::install("planet")
+library(wateRmelon)
+library(RPMM) # cran package
+
+
+#  i also like to use the first chunk to load a probe annotation object if im working with illumina dname data
+probeInfo <- as.data.frame(cbind(IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Locations, 
+                                 IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Other, 
+                                 IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Manifest)) # 865859 by 30
+probeInfo$probeID <- rownames(probeInfo)
+chrXprobes <- probeInfo %>% filter(chr == "chrX") # 19090
+chrYprobes <- probeInfo %>% filter(chr == "chrY") # 537
+autoProbes <- probeInfo %>% filter(!(chr %in% c("chrX", "chrY")))
+```
+
+
+## 1.0 Read in data
+
+These are the two data objects that you generated in the last script by parsing the GEO data.
+
+```{r}
+
+pDat <- read.csv("Z:/7_ExternalData/GSE115508/GSE115508_pData.csv")
+rgset <- readRDS("Z:/7_ExternalData/GSE115508/GSE115508_rgset.rds")
+
+# make sure that the same samples are present in the same order in both rgset and pdata
+all.equal(pDat$Sample_ID, colnames(rgset)) # must be TRUE before proceeding
+
+```
+
+```{r}
+
+mset <- preprocessRaw(rgset)
+betas <- getBeta(mset)
+
+test <- lumi::beta2m(betas)
+
+```
+
+
+## 2.0 Identity checks
+
+In this section we are going to use functions from the ewastools package to investigate how genetically distinct each of these 79 samples is. We are expecting a lot of genetic "replicates" as this dataset is comprised of three tissue types sampled across the same placenta for several cases.
+
+You can go through these objects that we are generating to understand what each of them is and why we are using them!
+
+### 2.1 Check genotypes at 56 SNP probes
+
+In this step we are using the 56 SNP genotyping probes built into the EPIC array to estimate sample genotype at these 56 loci and compare across all samples. Essentially it is very unlikely that two samples will have the same 56 SNP genotypes unless they are genetically identical. These loci are polymorphic enough that this check can effectively distinguish between mother and offspring, or non-twin siblings (based on our lab's experience).
+
+```{r}
+
+rs <- getSnpBeta(rgset)
+genotypes <- call_genotypes(rs)
+
+enumerate_sample_donors(genotypes) # what is this doing?
+pDat <- pDat %>% mutate(Sample_Donors = enumerate_sample_donors(genotypes))
+
+table(pDat$Case_ID, pDat$Sample_Donors) # essentially we want only one non-zero entry per row
+
+# this is a logical assessment that each row has exactly one non-zero entry
+# does it make sense? break it down from the inside out if not, what does table(pDat$Case_ID, pDat$Sample_Donors) == 0 look like?
+rowSums(table(pDat$Case_ID, pDat$Sample_Donors) == 0)
+
+# really to have a complete yet v simple to read assessment i would code it one step further like this:
+all(rowSums(table(pDat$Case_ID, pDat$Sample_Donors) == 0) == 42)
+
+# label samples with donor ID and number of times present in data genetically
+pDat <- pDat %>% group_by(Sample_Donors) %>% mutate(n_Duplicated = n())
+
+# notice in pDat there are also several technical replicates
+# i.e. same Case_ID and same tissue type, they are labelled _rvc in the Sample_ID column for replicate villi combined
+# let's label these too as we will need to remove them from any statistical analysis later, easier if indexed now
+
+grepl("_r", pDat$Sample_Name) # what is this doing?
+
+pDat <-  pDat %>%
+  mutate(Replicate = case_when(grepl("_r", Sample_Name) ~ "Replicate")) 
+
+pDat <- pDat %>% ungroup()
+
+```
+
+
+### 2.2 Index contamination
+
+How cleanly distributed the genotypes are at these 56 SNP probes also allows us to estimate how likely each sample is to be contaminated with a sample of another genotype (in the case of placental tissue, when we see a high degree of contamination it is almost always maternal DNA). In the case of aCA we are actually expecting maternal immune cells to infiltrate the fetal tissues, so maternal "contamination" in many cases may be more accurately referred to as maternal invasion. 
+
+In other analyses we might consider removing highly contaminated samples, but because it is actually part of the disease process in this cohort we definitely don't want to do that. We will keep them in and can test signals we find later for association with degree of maternal contamination, as it's possible that signature of differential methylation may actually be representing methylation patterns seen in maternal cell types (in fact, this is exactly what Chaini's work suggested, although we didn't have the contamination tool available at the time of her work).
+
+```{r index contamination}
+
+# this object contains the computed probability that each SNP is an outlier
+genotypes$outliers
+
+# let's summarize this for each sample across all SNPs by taking the mean prob that each SNP is an outlier
+colMeans(genotypes$outliers) 
+prob_outlier <- colMeans(genotypes$outliers)
+
+# we can add this estimated contamination to the metadata
+pDat$Prob_Contam <- prob_outlier
+
+#  plot this probability of contamination per each sample
+pDat %>% 
+  ggplot(aes(x=Tissue, y=Prob_Contam, color=Tissue)) +
+  geom_point(position=position_jitterdodge())
+
+pDat %>% 
+  ggplot(aes(x=Group, y=Prob_Contam, color=Group)) +
+  geom_point(position=position_jitterdodge())
+# is there a between-group difference? (visually)
+
+# the next is a hard plot to look at with lots going on,
+# i am only making it to briefly answer visually if every sample/tissue from the same placenta
+# has roughly the same degree of contamination. the answer is a resounding no :)
+pDat %>% 
+  ggplot(aes(x=Case_ID, y=Prob_Contam, color=Case_ID)) +
+  geom_point(position=position_jitterdodge()) +
+  geom_boxplot() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks = element_blank())
+
+```
+
+
+## 3.0 Check sex
+
+### 3.1 Ewastools method
+
+In this section I am going to evaluate the sex of all samples using a modified version of the ewastools check_sex() function. The only reason I'm modifying/writing my own code for this section rather than using the ewastools functions is that the ewastools package for this step requires you to re-read in the IDATs into an object of their specific format that is basically equivalent to an rgset. To me this seems redundant and also not memory-efficient if you already have an rgset loaded, so I modified the code to work with an rgset directly.
+
+```{r calc sex}
+
+mset <- preprocessNoob(rgset)
+
+# in the next step i am pulling tables of meth/unmeth fluo intensities per probe (rows) for every sample
+# take a peek at the data to clarify with head() 
+meth <- getMeth(mset)
+unmeth <- getUnmeth(mset)
+
+# compute total XY and auto probe intensities per sample/column
+# here i am pulling the methylated probes on chrX and adding that intensity to the unmethylated probes on chrX to get total fluo intensity
+# doing the same for all chrY probes and all autosomal probes
+chrX <- colMeans(meth[rownames(meth) %in% chrXprobes$probeID,] + unmeth[rownames(unmeth) %in% chrXprobes$probeID,])
+chrY <- colMeans(meth[rownames(meth) %in% chrYprobes$probeID,] + unmeth[rownames(unmeth) %in% chrYprobes$probeID,])
+auto <- colMeans(meth[rownames(meth) %in% autoProbes$probeID,] + unmeth[rownames(unmeth) %in% autoProbes$probeID,])
+
+# normalize XY to total auto intensity
+chrX <- chrX/auto
+chrY <- chrY/auto
+
+# create indices of which samples are male/female based on metadata labels
+female <- pDat$Sex %in% c("F", "Female")
+male <- pDat$Sex %in% c("M", "Male")
+
+# compute robust Hodges-Lehmann estimator for total intensities of XY probes
+# don't worry about understanding the statistics of this section, essentially this is a way of evaluating how 
+# tightly clustered the male and female signatures are, and which samples are statistically too far from the centre of a cluster
+# to be automatically considered part of the male/female cluster respectively
+cutX <- outer(chrX[male], chrX[female], "+")
+cutX <- mean(cutX)/2
+
+cutY <- outer(chrY[male], chrY[female], "+") 
+cutY <- median(cutY)/2
+
+cutX # these values will be our intercepts in next plot
+cutY
+
+# add norm sex chr intensities to pDat and predictsex using calc'd Hodges-Lehmann estimator
+pDat <- pDat %>% mutate(chrX_nInt = chrX,
+                        chrY_nInt = chrY)
+pDat <- pDat %>% mutate(Pred_Sex = case_when(chrX_nInt>=cutX & chrY_nInt<=cutY~"Female",
+                                             chrX_nInt<=cutX & chrY_nInt>=cutY~"Male"))  # here we are using those thresholds
+
+pDat <- pDat %>% mutate(Reported_Sex = ifelse(Sex %in% c("F", "Female"), "Female", "Male"))
+table(pDat$Sex, pDat$Reported_Sex) # looks at first like all predicted sexes match reported, yay
+
+
+# plot this, one male in particular looks a bit contam with maternal DNA 
+# Q: females contam with maternal will NOT show up on this check! (why not?)
+ggplot(pDat, aes(x=chrX_nInt, y=chrY_nInt, color=Reported_Sex)) + 
+  geom_point() +
+  geom_hline(yintercept=cutY) +
+  geom_vline(xintercept=cutX) +
+  labs(title="Normalized Fluorescence Intensity",
+       y="chrY Fluorescence",
+       x="chrX Fluorescence",
+       color="Reported Sex") +
+  theme_minimal() +
+  theme(plot.title= element_text(hjust=0.5))
+
+```
+
+## 4.0 Sample QC
+
+Based on the above checks, do you think any samples need to be removed?
+
+
+
+## 5.0 Predict Ancestry & Cell Composition
+
+In this section we are going to predict sample ancestry and cell composition with tools in Victor's planet package. We do this before probe filtering because we rely on probes for this step that are commonly removed later on. Specifically, planet's ancestry estimation understandably relies on the 56 SNP genotyping probes, as well as other probes near highly polymorphic SNP loci that get removed when we exclude polymorphic probes.  
+
+To prep for this step, we first have to noob + BMIQ normalize our data (as recommended by Victor's package documentation, because this is how he treated the data that he built the predictors with). We have already noob-normalized, so we will take the output of noob normalization (the mset object) and BMIQ normalize it. All of this prerequisite info is documented in the package Vignette for your reference (don't need to read it all, the code is below, good to know for future though where this info is). Vignette here: http://bioconductor.org/packages/release/bioc/vignettes/planet/inst/doc/planet.html 
+
+```{r}
+
+# this is slow!
+betas_bmiq <- BMIQ(mset)
+
+```
+
+
+### 5.1 Predict Cell Composition
+
+```{r}
+
+# load planet's reference data (CpGs and coefficients used to calculate cell composition for 3rd T samples)
+data("plCellCpGsThird")
+
+# this code calculates estimated cell proportions for 6 major cell types in each sample
+houseman_estimates <- minfi:::projectCellType(
+    betas_bmiq[rownames(plCellCpGsThird), ],
+    plCellCpGsThird,
+    lessThanOne = FALSE
+) %>% as.data.frame()
+
+head(houseman_estimates) # samples are rows, 6 cell type colums with relative proportions
+
+# add this to metadata, first need to reassign rownames to a column in houseman_estimates so we can join by this column to pDat
+houseman_estimates <- houseman_estimates %>% rownames_to_column(var="Sample_ID")
+  
+pDat <- pDat %>% left_join(houseman_estimates, by="Sample_ID")
+
+```
+
+### 5.2 Predict Ancestry
+
+```{r}
+
+data("ethnicityCpGs")
+all(ethnicityCpGs %in% rownames(betas_bmiq)) # FALSE - because converting to an mset automatically drops the 59 SNP probes
+
+betas_planet <- rbind(betas_bmiq, rs) # add snp betas from earlier in script to larger beta value matrix
+
+# check again
+all(ethnicityCpGs %in% rownames(betas_planet)) # should be TRUE
+
+# predict ancestry (the planet output is highly correlated with genetic ancestry so wendy likes to call it ancestry, but tool was trained on 
+# ethnicities that were self-reported so that is why the word ethnicity is used in functions
+planet_estimates <- predictEthnicity(betas_planet)
+head(planet_estimates)
+
+# add to metadata
+pDat <- pDat %>% left_join(planet_estimates, by="Sample_ID")
+
+```
+
+
+At this point...
+Take a second to look through the metadata and make sure everything looks right and makes sense! Use the head() function, look at the new columns we generated, and check whether there are any missing values, etc.
+
+Also now is a great time to check for duplicated columns (i.e. if any join functions were accidentally performed > once).
+
+
+
+## 6.0 Probe Filtering
+
+In these next several steps we are going to filter probes based on the various criteria we have discussed thus far (cross-hybridizing, polymorphic, etc). Some of these steps rely on external database resources that I will send you!
+
+### 6.1 SNP (rs) probes
+
+First step is to always make sure the rs probes are not present in your dataset.
+
+```{r}
+
+# go back to using the noob-normalized beta values
+table(rownames(rs) %in% rownames(betas))
+
+# are there any that need to be removed?
+
+```
+
+
+### 6.2 Polymorphic & cross-hybridizing probes
+
+The Zhou EPIC annotation is the resource I like best for this step when working with EPIC data. With 450k you have more resources to choose between (Price, Chen, Zhou), but I prefer how the Zhou et al. team did their analysis and showed independent evidence that the probes they recommend to remove are poor-performing. 
+
+Based on how their annotation is structured they have a single column that removes both polymorphic and cross-hybridizing probes at the same time, as this is what they really focused on. This is captured in the MASK.general column, which is their recommended general purpose masking merged from "MASK.sub30.copy", "MASK.mapping", and "MASK.extBase" (first three are nonspecific probes for various reasons) as well as "MASK.typeINextBaseSwitch" and "MASK.snp5.GMAF1p" (polymorphic probes, SNP in SBE or SNP in the last bp with a MAF>0.01). 
+
+```{r}
+
+# read in the zhou annotation object (downloaded from their github website)
+zhouAnno <- read.delim("Z:/Amy/Data/Probe Info (Illumina Manifests)/Zhou/EPIC.hg19.manifest.tsv")
+
+# check str of new zhouAnno - no mutates, already has proper probeID column
+str(zhouAnno)
+
+# can you determine out how many probes on the X and Y will be removed if we remove everything from the MASK_general column?
+table(zhouAnno$MASK_general) # this is how i'd start..
+
+```
+
+```{r}
+
+# now let's actually remove those probes
+zhou_maskgeneral <- zhouAnno %>% filter(MASK_general == TRUE)
+dim(zhou_maskgeneral) # 99360 that need to be removed
+
+# when filtering/removing things from a dataset it's always a good idea to check the dimensions before and after filtering
+# to ensure that the results meet your expectations
+dim(betas)
+betas <- betas[!(rownames(betas) %in% zhou_maskgeneral$probeID), ]
+dim(betas)
+
+#  did this work as expected?
+
+```
+
+### 6.3 Detection P
+
+Poor quality probes are those with a detection P value > 0.01 in >1% of samples. (This 1% threshold is me being strict, some people use 20% of samples but I'd rather remove things that might be poor quality than risk basing results on them). 
+
+Remember - this is a step that has to be done sex-stratified. 
+
+```{r }
+
+# to understand what is being done here, what is the result if you do it stepwise? (i.e. run just detectionP(rgset) first then >0.01 on the output)
+detP <- minfi::detectionP(rgset) 
+detP <- detP > 0.01
+(head(detP))
+
+
+# rather than actually sex-stratifying i am going to change all the female Y chromosome values to NA so
+# that they arent considered in the computation of whether detP is > 0.01 in >1% of samples
+
+
+# to do this i need to first select detP object probes that are in females, on the Y
+# using the index of female TRUE/FALSE created earlier in the script
+detP[rownames(detP) %in% chrYprobes$probeID, female] <- NA
+
+# preview this to make sure it assigned NAs correctly to this subset of probes/samples
+femaleYdetP <- detP[rownames(detP) %in% chrYprobes$probeID, female]
+head(femaleYdetP)
+all(femaleYdetP %in% NA) # should be TRUE
+
+table(rowSums(detP) > (nrow(pDat)*0.01)) # how many probes with poor detP?
+
+# index them for removal
+badDetP <- data.frame(probeDetP = rowSums(detP) > nrow(pDat)*0.01) %>% filter(probeDetP == TRUE)
+
+table(chrXprobes$probeID %in% rownames(badDetP)) # 426
+table(chrYprobes$probeID %in% rownames(badDetP)) # none now
+
+
+# check how many X and Y probes are failing this step to ensure it is not most Y probes (as if not sex-strat)
+# how can you code this? i would try a table() call using chrXprobes$probeID and the same for chrYprobes...
+
+
+
+```
+
+
+```{r}
+
+# remove bad detection P probes from the beta value matrix
+# remember to check dimensions before and after filtering
+dim(betas)
+
+# can you figure out how to code the removal of probes (rows) from betas that are present in the badDetP object?
+
+```
+
+### 6.4 Beadcount
+
+In this step we could remove probes with a beadcount of <3. However, as Chaini did not do this in the original paper I think for consistency it would be better to match her process (relatively speaking). Very few probes are normally removed in this step anyways, and they are typically also caught in other poor quality steps (usually the detP step actually) as they often fail for other reasons.
+
+
+### 6.5 Non-variable probes
+
+In general, we typically remove non-variable probes now. To be statistically valid we need to do this with reference to an external database or a priori biological knowledge. Unfortunately, a resource for EPIC placenta data does not exist for this yet that includes the X and Y so we are limited in our ability to do so. Additionally, it's my feeling and Carolyn seems to agree that non-variable probes may actually be quite interesting on the X as they reflect patterns of consistent methylation. So for the purposes of this project since you will be comparing females with aCA to females without (and males with versus without), we will leave in the non-variable for now, due to technical limitations.
+
+
+## 7.0 Remove replicate samples
+
+Now, we are getting close to being able to run statistical analyses on these samples. In most statistical methods it is critical to make sure that the samples you are analyzing are independent of each other (ie. not genetically the same sample more than once). This is true in every type of analysis except for those that explicitly account for multiple identical samples, such as linear mixed models.
+
+```{r}
+
+# remember we indexed the replicates in the pDat object
+table(pDat$Replicate) # 4 need to be removed
+
+dim(pDat)
+pDat_filt <- pDat %>% filter(!(Replicate %in% "Replicate"))
+dim(pDat_filt) # did that work?
+
+# can you think of another way to verify that it worked more rigorously than relying on just the number of rows?
+
+```
+
+### 8.0 Subset to villi only
+
+Since time is limited in a rotation, let's focus on only the villi samples to start with. Can you write code to subset pDat_filt even further to only the 44 Chorionic Villi samples?
+
+```{r}
+
+```
+
+
+## 9.0 Subset data to match same samples
+
+Okay, now we have two basic objects: (1) a beta value matrix for all 79 samples that has been probe filtered. (2) a list of the samples post-filtering that we are going to use for analysis in pDat_filt.
+
+Using the pDat_filt$Sample_ID column, please subset the betas object to the same 44 samples as contained in the rows of pDat_filt.
+
+```{r}
+
+```
+
+
+Now, let's check how many X and Y chromosome probes are present in the filtered object to work with later on. We also should assess the sex balance of the metadata at this stage. Please do both in the code chunk below.
+
+```{r}
+
+```
+
+
+
+## 10.0 Save output
+
+In this step, at the completion of the probe filtering script, let's save a local copy of the pDat_filt and betas objects. These will be loaded directly into your next MarkDown script and used for analysis.
+
+```{r}
+
+saveRDS(pDat_filt, "/path_to_local_dest/pDat_filt.rds") 
+saveRDS(betas_filt, "/path_to_local_dest/betas_filt.rds") 
+
+```
+
+## 11.0 Knit this script
+
+At the very end of the process, it is best practice to knit the script and ensure that it knits properly without any errors. If there are errors they usually point to undetected errors in your script that should actually be resolved before moving on!
+
+

@@ -1,0 +1,205 @@
+---
+title: "01 aCA Processing"
+author: "Amy Inkster"
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+## 0.0 Intro & setup
+
+In this script we will the data associated with the acute chorioamnionitis dataset. This data will be processed (can also call it "preprocessing" but Wendy dislikes that term) and normalized. Eventually, in a subsequent script we will test  for differential DNAme by chorioamnionitis status within each sex.
+
+### 0.1 Install and loack packages
+
+In the first chunk, I like to load all tha packages that I will use functions from in a particular script. When working with DNAme data I also like to load in the probe annotation for a particular array (a large table that contains information about each probe on the array, including what Probe Type it is, location targeted in the genome , genes/genomic regions that it overlaps, etc).
+
+You will need to install any packages that you do not already have installed. Usually, this can be achieved by googling the package and visiting either the CRAN repository webpage for it, or the bioconductor webpage. CRAN packages can be installed with install.packages("packagenamehere"), while Bioconductor packages can be installed with the BiocManager package (which is a CRAN package you need to install first), and then using BiocManager::install("packagenamehere").
+
+The syntax packagename::function in R is used to call a particular function from a particular package in R without explicitly loading the package using library(packagename) first. This is useful for cases where you only want to use one function from a particular package once or a few times in a script, I am using it in the above case because I only need the BiocManager to install another package, and will not use any other BiocManager functions in the remainder of this script. 
+
+```{r setup, echo=F, message=F, warning=F}
+
+library(minfi) # this is a bioconductor package
+library(tidyverse)
+library(readxl)
+
+probeInfo <- as.data.frame(cbind(IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Locations, 
+                                 IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Other, 
+                                 IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Manifest))
+probeInfo$probeID <- rownames(probeInfo)
+
+# in the below code, i am subsetting the probe annotation into two separate lists, containing
+# all probes on the X and all probes on the Y
+chrXprobes <- probeInfo %>% filter(chr == "chrX") 
+chrYprobes <- probeInfo %>% filter(chr == "chrY") 
+
+```
+
+### 0.2 Explore probe annotation
+
+Use this time/space to explore the probeInfo, chrXprobes and chrYprobes objects. How many probes are there in each object? How many columns are in the dataframes? Use code like dim() etc to figure out how many rows/columns are in each table, you can use view() to open the tables in another window as well.
+
+```{r}
+
+# explore probe annotation objects
+
+```
+
+
+
+## 1.0 Read in the raw data
+
+
+In this section I am reading in the raw DNAme data that Chaini parsed with Genome Studio. I am choosing to do this with the Master Sample Sheet rather than the batch-specific sample sheets as the Master Sample Sheet is a constantly-updated document by users in the lab and is what I generally prefer to use for loading in data, to make sure that I am getting the most updated information for any particular set of samples.
+
+### 1.1 Organize data from master sample sheet and GEO
+
+This is only spreadsheet level information in the first chunk, we will use it to read in the rgset in the subsequent step.
+
+```{r read in data}
+
+# read in entire master sample sheet 
+masterSS <- read_xlsx("Z:/ROBLAB6 InfiniumSequenom/Master_Sample_Sheet.xlsx", col_names = T)
+
+# to read in data we need to subset the masterSS to the correct samples
+# the acute chorioamionitis samples were run in the EPIC/850k batch 7
+batch7 <-  masterSS %>% filter(Batch == "Batch 7", Platform == "850k")
+
+# how many samples are in batch 7?
+# take some time to explore the batch7 object
+# what is the difference between the Sample_Name and Case_ID columns?
+
+# using the below code, how many unique placental samples were investigated in this project?
+# what is the below code doing?
+unique(batch7$Case_ID)
+
+
+# to get an idea of how many samples of each tissue there are i am going use the Tissue column, tissue is also inicated by the suffix on the end of each Sample_Name (the suffixes are _vc = combined villi,  _amc = combined amnion, _chc = combined chorion). The "combined" indicates that for each placenta we sampled 4 sites and combined them in equimolar parts after DNA extraction.
+
+# the table function is really handing for counting data based on categorical variables
+# what are the following two commands telling us?
+table(batch7$Tissue)
+table(batch7$Tissue, batch7$Case_ID)
+
+
+# next, this dataset also has a number of replicates that we need to know about
+# they are currently indicated with _rvc labels (reps only run for villi samples here)
+
+# how many replicates are there?
+# in the below code, try to break it up/change it and understand what is happening here
+# i am selecting anything with the "_rvc" string in the Sample_Name column and using it to subset the dataframe
+# notice i am not assigning the subsetted object to anything, i am just printing it
+# so we are not modifying the original batch7 object, i am just looking at part of it based on a condition
+grep("rvc", batch7$Sample_Name) # what is this result?
+batch7[grep("rvc", batch7$Sample_Name),] # 4
+
+
+
+
+# last thing before we actually use the sample sheet/batch7 object to read in the data
+# is to read in the metadata associated with the villi from this run, and make sure the information matches
+# note - i/we tend to use the terms metadata and phenotypic data (pDat/pData) interchangeably
+pDat <- read.csv("Z:/7_ExternalData/GSE115508/GSE115508_pData.csv")
+
+# you don't have to run any of this code but this is to show you how i parsed the metadata from GEO
+# i couldn't find a clean copy of all samples, all tissues in Chaini's or the ROBLAB6 EPIC folders
+# GSE115508 <- read.table("Z:/7_ExternalData/GSE115508/GSE115508_series_matrix.txt", sep = "\t", skip = 31, nrow = 16, header = T) %>% as.data.frame
+# GSE115508 <- GSE115508[-c(2:8),]
+# 
+# GSE115508$X.Sample_title <- gsub("!Sample_", "", GSE115508[,1]) # remove "!Sample_" prefix from rownames
+# GSE115508 <- GSE115508[,2:ncol(GSE115508)] %>% t()
+# colnames(GSE115508) <- c("GEO_Accession", "Case_ID", "Tissue",
+#                          "Group", "Sex", "GA",
+#                          "Plate", "Sentrix_ID", "Sentrix_Position")
+# GSE115508 <- GSE115508 %>% as.data.frame()
+# GSE115508 <- rownames_to_column(GSE115508, var="Sample_Name")
+# 
+# GSE115508 <- GSE115508 %>% 
+#   mutate(Case_ID = gsub("patient id: ", "", Case_ID),
+#          Tissue = gsub("tissue: ", "", Tissue),
+#          Group = gsub("pathology group: ", "", Group),
+#          Sex = gsub("fetal sex: ", "", Sex),
+#          GA = gsub("gestational age: ", "", GA),
+#          Plate = gsub("850k plate: ", "", Plate),
+#          Sentrix_ID = gsub("850k sentrix_id: ", "", Sentrix_ID),
+#          Sentrix_Position = gsub("850k sentrix_position: ", "", Sentrix_Position))
+# GSE115508 <- GSE115508 %>% mutate(Sample_Name = str_replace(Sample_Name, "r_vc", "_rvc"))
+# write.csv(GSE115508, "Z:/7_ExternalData/GSE115508/GSE115508_pData.csv", row.names=F)
+
+
+
+
+# take some time to explore the metadata (pDat), notice that it is 79 samples/rows long vs the batch7 object that is 80 rows
+# we need to figure out which sample Chaini removed (for technical reasons) as we will exclude the same one
+table(pDat$Sample_Name %in% batch7$Sample_Name) # all 79 present in batch7
+table(batch7$Sample_Name %in% pDat$Sample_Name) # 1 missing!
+
+
+batch7[!(batch7$Sample_Name %in% pDat$Sample_Name), ] # PL31_amc is not in final GEO dataset
+
+# lets remove this obe from the batch7 object as well to match the pDat
+batch7 <- batch7 %>% filter(!(Sample_Name == "PL31_amc"))
+
+# and put these two dataframes together in a master list object
+all.equal(pDat$Sample_Name, batch7$Sample_Name) # this is testing if they are in the same order, are they?
+
+# since they are not in the same order we are going to use a "join" function to coalesce & combine
+batch7 <- batch7 %>% 
+  dplyr::select(-c(GA, Sex, Tissue, Sentrix_ID, Sentrix_Position)) %>%  # drop empty cols from master SS
+  left_join(pDat, by=c("Sample_Name", "Case_ID")) # we are filling those with data from pDat
+
+# now do we have 79 samples?
+# can you confirm we are not including PL31_amc?
+# do the above with code! :) and can check visually too, hint, try using %in% and writing a logical expression
+
+
+# very last before we read in the data, one of the basenames is duplicated (i'm not sure why, i think it is to do with the rescan issue)
+
+# try generating our own basename column manually
+batch7 <- batch7 %>% mutate(Basename_2 = paste0("Z:/ROBLAB6 InfiniumSequenom/EPIC Raw data/Batch7_rescan/",
+                                               Sentrix_ID, "/",
+                                               Sentrix_ID, "_", Sentrix_Position))
+length(unique(batch7$Basename)) # 78, i.e. 1/79 is duplicate :(
+length(unique(batch7$Basename_2)) # 79 - fixed!
+
+batch7[duplicated(batch7$Basename),] # PL29_amc sample is the affected one
+duplicate <- batch7[duplicated(batch7$Basename),] 
+duplicate <- duplicate$Basename
+
+batch7 %>% filter(Basename == duplicate) 
+# both PL29 samples with same basename, i think this must be a typo on the batch sample sheet that
+# the master sample sheet pulls from. we will use our manual basenames column to read in the data.
+
+```
+
+### 1.2 Parse rgset
+
+In this section the code will parse the data from the IDAT files into an rgset object. Before doingthis take some time to read the documentation for the minfi::read.metharray() function to get a basic idea of what the resulting rgset is. Google "minfi read.metharray function" to find the info page! or ?read.metharray
+
+```{r}
+
+# read data into rgset, this step takes a long time! normal for several warnings - it is still working.
+# apparently the package developer (Kasper D Hansen) is not quite sure why this happens but is working on it
+# see issue here: https://github.com/hansenlab/minfi/issues/218 
+rgset <- read.metharray(basenames=batch7$Basename_2)
+
+# now do some basic exploration of the rgset
+# use the functions below...how many probes and samples are in this rgset?
+annotation(rgset) # should be the b4 annotation 
+str(rgset)
+rgset
+
+# what is stored in the rows and columns?
+head(colnames(rgset))
+head(rownames(rgset))
+
+# make a corresponding sample ID column in the batch7 object so that the two can be used together
+batch7 <- batch7 %>% mutate(Sample_ID = paste0(Sentrix_ID, "_", Sentrix_Position))
+
+# check if the rows of the batch7 metadata are in the same order as the columns of the rgset
+all.equal(batch7$Sample_ID, colnames(rgset)) # must be true!
+
+```
+
+Great! We will go over this code at our next Monday meeting, don't worry if it's not finished. Next, we will use the rgset to move onto probe filtering and sample QC.

@@ -1,0 +1,425 @@
+---
+title: "aCA GEO Download"
+author: "Chris Teng"
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+Refactor of GEO Download notebook provided by Amy Inkster in the Robinson Lab
+
+# REQUIREMENTS
+
+Required libraries for this notebook
+
+```{r echo = FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("devtools", quietly = TRUE)) {
+  install.packages("devtools")
+}
+
+required_packages <- list(
+  c("minfi", "bioconductor"),
+  c("IlluminaHumanMethylationEPICanno.ilm10b4.hg19", "bioconductor"),
+  c("IlluminaHumanMethylationEPICmanifest", "bioconductor"),
+  c("lumi", "bioconductor"),
+  c("vctrs", "general"),
+  c("purrr", "general"),
+  c("hhhh5/ewastools", "github")
+)
+for (package in required_packages) {
+  package_name = package[1]
+  source_name = package[2]
+  
+  if ((source_name == "bioconductor") && !requireNamespace(package_name, quietly = TRUE)) {
+    BiocManager::install(package_name)
+  } else if ((source_name == "general") && !requireNamespace(package_name, quietly = TRUE)) {
+    install.packages(package_name)
+  } else if ((source_name == "github") && !requireNamespace(package_name, quietly = TRUE)) {
+    devtools::install_github(package_name)
+  }
+}
+
+# have to make library call to overload the pipe `%>%` operator
+library(tidyverse)
+```
+
+
+# File Download and Sanity Checks
+
+File is located at https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE115508&format=file
+
+Download and rename to GSE115508_RAW.tar if necessary
+
+The following code snippets should work for macOS and Linux. Not sure if Windows Powershell has these utilities installed by default
+
+Result should be all .idat files and metadata have been extracted to the directory GSE115508
+
+```{bash echo = FALSE}
+// the contents of the tarball are all .idat.gz archives
+// make a directory to store the archives and the extracted .idat files and metadata
+mkdir -p GSE115508/archives
+
+// untar the tarball
+tar -xvf GSE115508_RAW.tar -C GSE115508/archives
+
+// unzip the .gz archives and keep the original archives
+// -d decompresses
+// -k keeps the original archive
+for file in GSE115508/archives/*.gz; do
+    gunzip -dk "${file}"
+    mv "${file%.gz}" GSE115508/
+done
+```
+
+
+## Load the .IDAT Files into an S4 object
+
+```{r echo = FALSE}
+requireNamespace("minfi")
+
+rgset <- minfi::read.metharray.exp("~/github_repos/robinson_lab/bin/GSE115508/")
+
+# alternatively load from RDS
+rgset <- loadRDS("~/github_repos/robinson_lab/bin/GSE115508.rds")
+```
+
+## View the S4 Object
+
+```{r echo = FALSE}
+View(rgset)
+```
+
+### Basic EDA
+
+How many probes and samples are in this rgset?
+```{r echo = FALSE}
+# get the object attributes
+rgset_attrs <- names(attributes(rgset))
+
+# documentation for RGChannelSet @ ?RGChannelSet
+
+# addresses (i.e. probe identifiers) of the array are the row names 
+probes <- rownames(rgset)
+sprintf("Num probes: %s", length(probes)) # alternatively just nrow(rgset)
+
+# sample names/phenotype information are the column names
+samples <- colnames(rgset)
+sprintf("Num samples: %s", length(samples)) # alternatively just ncol(rgset)
+```
+
+Array metadata
+```{r echo = FALSE}
+print(rgset@annotation)
+```
+
+What is stored in the rows and columns?
+```{r echo = FALSE}
+green_probes <- minfi::getGreen(rgset)
+red_probes <- minfi::getRed(rgset)
+
+head(green_probes)[,1:10]
+
+# green channel as a matrix is fluorescence measurements per probe (rows) for a given sample (column)
+```
+
+## Save data to file
+```{r echo = FALSE}
+saveRDS(rgset, file = "~/github_repos/robinson_lab/bin/GSE115508.rds")
+```
+
+
+# HEADER 2
+
+```{r echo = FALSE}
+# Manifest - probe names, addresses, type, experimental metadata
+# Other - forward sequence, accession numbers, feature group names, study metadata?
+# Locations - chromosome, chromosomal position, and strand
+
+probe_locations <- IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Locations
+probe_metadata <- IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Manifest
+probe_study_data <- IlluminaHumanMethylationEPICanno.ilm10b4.hg19::Other
+```
+
+
+## Validate that all of the probes exist in all of the data sets
+```{r}
+probe_list <- purrr::reduce(
+  list(
+    rownames(probe_locations),
+    rownames(probe_metadata),
+    rownames(probe_study_data)
+  ), union
+)
+sprintf("Length of union of all probes: %s", length(probe_list))
+
+idx <- 1
+for (data_set in list(probe_locations, probe_metadata, probe_study_data)) {
+  probe_names <- rownames(data_set)
+  
+  if (!all(probe_names != probe_list)) {
+    sprintf("Error in data set %s", idx)
+  } else {
+    idx <- idx + 1
+  }
+}
+```
+
+## Merge data sets together
+```{r}
+# order by row name since cbind doesn't default merge by row name
+probe_locations <- probe_locations[order(rownames(probe_locations)), ]
+probe_metadata <- probe_metadata[order(rownames(probe_metadata)), ]
+probe_study_data <- probe_study_data[order(rownames(probe_study_data)), ]
+
+# concatenate by along columns
+probe_info <- as.data.frame(
+  cbind(
+    probe_locations,
+    probe_study_data,
+    probe_metadata
+  )
+)
+
+# add additional field for probe ID
+probe_info$probeID <- rownames(probe_info)
+
+# get subset of probes to yield X chr probes, Y chr probes, and autosomal probes
+# https://github.com/tidyverse/dplyr/issues/6256 - filter might be slower than base R
+
+# chrX_probes <- probe_info[probe_info["chr"] == "chrX", ]
+chrX_probes <- probe_info %>% filter(chr == "chrX")
+
+# chrY_probes <- probe_info[probe_info["chr"] == "chrY", ]
+chrY_probes <- probe_info %>% filter(chr == "chrY")
+
+# autosomal_probes <- probe_info[!(probe_info[["chr"]] %in% c("chrX", "chrY")), ]
+autosomal_probes <- probe_info %>% filter(!(chr %in% c("chrX", "chrY")))
+```
+
+## Read in phenotypic data
+
+Start with the series matrix downloaded from GEO
+
+```{r}
+series_matrix <- read.table(
+  "~/github_repos/robinson_lab/bin/GSE115508/GSE115508_series_matrix.txt",
+  sep = "\t",
+  skip = 31,
+  nrows = 40,
+  as.is = TRUE,
+  header = TRUE
+) %>% as.data.frame
+
+# remove some of the intervening metadata that isn't necessary for analysis
+series_matrix <- series_matrix[-c(2:8), ]
+
+# clean up the row names
+series_matrix$X.Sample_title <- gsub(
+  "^!Sample_",
+  "", 
+  series_matrix$X.Sample_title
+)
+
+# transpose the data frame so that the rows are the samples and the columns are the data/metadata
+# keep the row names at the start to relabel the columns of the transposed data frame
+field_names <- series_matrix$X.Sample_title
+series_matrix <- series_matrix[, 2:ncol(series_matrix)] %>% BiocGenerics::t() %>% as.data.frame
+colnames(series_matrix) <- field_names
+series_matrix$Sample_Name <- rownames(series_matrix)
+
+# rename the first few columns
+# note that the indexing ranges in R are inclusive on either bound
+colnames(series_matrix)[1:9] <- c(
+  "GEO_Accession",
+  "Case_ID",
+  "Tissue",
+  "Group",
+  "Sex",
+  "GA",
+  "Plate",
+  "Sentrix_ID",
+  "Sentrix_Position"
+  )
+
+# the next step doesn't allow for duplicated columns/fields so check if there are any
+sprintf("Duplicated fields: %s", paste(colnames(series_matrix)[duplicated(colnames(series_matrix))], collapse = ", "))
+
+# since there are duplicated columns, make any duplicates uniquely named
+colnames(series_matrix) <- make.unique(colnames(series_matrix), sep = ".")
+
+# modify fields to get rid of unnecessary "prefixing" info
+series_matrix <- series_matrix %>%
+  mutate(Case_ID = gsub("patient id: ", "", Case_ID),
+         Tissue = gsub("tissue: ", "", Tissue),
+         Group = gsub("pathology group: ", "", Group),
+         Sex = gsub("fetal sex: ", "", Sex),
+         GA = gsub("gestational age: ", "", GA),
+         Plate = gsub("850k plate: ", "", Plate),
+         Sentrix_ID = gsub("850k sentrix_id: ", "", Sentrix_ID),
+         Sentrix_Position = gsub("850k sentrix_position: ", "", Sentrix_Position))
+
+# change "r_vc" sub-strings in the sample name to "_rvc"
+series_matrix <- series_matrix %>% mutate(Sample_Name = str_replace(Sample_Name, "r_vc", "_rvc"))
+
+# change order of fields so that the "Sample Name" field is first
+series_matrix <- series_matrix[c("Sample_Name", head(colnames(series_matrix), -1))]
+
+# write to file
+write.csv(series_matrix, "~/github_repos/robinson_lab/bin/GSE115508_series_matrix_processed.csv", row.names=F)
+```
+
+# Probe Filtering
+
+## Initial Data Check
+
+```{r}
+# need to make a mapping field from the phenotype/series_matrix to the rgset data
+series_matrix <- series_matrix %>% mutate(
+  Sample_ID = paste(GEO_Accession, Sentrix_ID, Sentrix_Position, sep = "_")
+)
+
+# make sure that the same samples are present in the same order in both rgset and series matrix
+sprintf("Mapping field present: %s", all(series_matrix$Sample_ID == colnames(rgset)))
+```
+
+## Data Pre-processing
+
+```{r}
+# convert the red/green channel for an Illumina methylation array into a methylation signal with no normalization
+# returns an instance of MethylSet
+methylation_signal_raw <- minfi::preprocessRaw(rgset)
+
+# calculate the beta values of the methyaltion set per probe per sample
+betas <- getBeta(methylation_signal_raw)
+
+m_values <- lumi::beta2m(betas)
+```
+
+## Identity Checks
+
+In this section we are going to use functions from the ewastools package to investigate how genetically distinct each of these 79 samples is. We are expecting a lot of genetic "replicates" as this dataset is comprised of three tissue types sampled across the same placenta for several cases.
+
+```{r}
+# isolate the probes that are for genotyping the sample
+genotype_probes <- minfi::getSnpBeta(rgset)
+
+# determine sample genotype with genotyping probes
+# question: what are the values in the genotypes output? probabilties (i.e. 0 == definitely not outlier, 1 == outlier)?
+genotypes <- ewastools::call_genotypes(genotype_probes)
+
+# get, for each sample, the donor ID
+donor_ids <- ewastools::enumerate_sample_donors(genotypes)
+series_matrix$Sample_Donors <- donor_ids
+
+# check that for each sample, there's only one corresponding donor ID
+sample_donor_check <- all(rowSums(table(series_matrix$Case_ID, series_matrix$Sample_Donors) != 0) == 1)
+sprintf("Only one donor ID per sample: %s", sample_donor_check)
+
+# get the number of times each donor ID is duplicated within the data set
+# these would be genetic replicates?
+series_matrix <- series_matrix %>% group_by(Sample_Donors) %>% mutate(n_duplicated = n())
+
+# label technical replicates
+series_matrix <- series_matrix %>%
+  mutate(
+    Replicate = case_when(
+      grepl(
+        "_r(?=vc)", Sample_Name, perl = TRUE
+      ) ~ "Replicate", .default = "Non-replicate"
+    )
+  )
+```
+
+## Index Contamination
+
+How cleanly distributed the genotypes are at these 56 SNP probes also allows us to estimate how likely each sample is to be contaminated with a sample of another genotype (in the case of placental tissue, when we see a high degree of contamination it is almost always maternal DNA). In the case of aCA we are actually expecting maternal immune cells to infiltrate the fetal tissues, so maternal "contamination" in many cases may be more accurately referred to as maternal invasion. 
+
+In other analyses we might consider removing highly contaminated samples, but because it is actually part of the disease process in this cohort we definitely don't want to do that. We will keep them in and can test signals we find later for association with degree of maternal contamination, as it's possible that signature of differential methylation may actually be representing methylation patterns seen in maternal cell types (in fact, this is exactly what Chaini's work suggested, although we didn't have the contamination tool available at the time of her work).
+
+Questions:
+---
+> How cleanly distributed the genotypes are at these 56 SNP probes also allows us to estimate how likely each sample is to be contaminated with a sample of another genotype
+
+Why? Does this have to do with the "confidence" with which a genotype can be assigned to a given probe? Lower confidence -> more likely to be contaminated with another sample?
+
+---
+> let's summarize this for each sample across all SNPs by taking the mean prob that each SNP is an outlier
+
+Why choose the mean as the most representative test statistic for the outlier probabilities for a given sample? The probabilities appear bi-modal for at least some of the samples so maybe the mean isn't the best choice?
+
+### Check how probability of outlier varies within the data
+
+```{r}
+# let's summarize this for each sample across all SNPs by taking the mean prob that each SNP is an outlier
+prob_outlier <- colMeans(genotypes$outliers)
+series_matrix$p_contamination <- prob_outlier
+
+# plot the mean probability of contamination per tissue
+ggplot2::ggplot(
+  series_matrix, aes(x = Tissue, y = p_contamination, color = Tissue)
+) + geom_point(position = ggplot2::position_jitterdodge())
+
+# plot the mean probability of contamination per group
+ggplot2::ggplot(
+  series_matrix, aes(x = Group, y = p_contamination, color = Group)
+) + geom_point(position = ggplot2::position_jitterdodge())
+
+# no real between-group difference in probability of contamination visually
+```
+
+```{r}
+# probability of contamination is highly variable between samples
+ggplot2::ggplot(
+  series_matrix, aes(x=Case_ID, y=p_contamination, color=Case_ID)
+) + 
+  geom_point(position=position_jitterdodge()) + 
+  geom_boxplot() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks = element_blank()
+  )
+```
+
+### Check sex
+
+From original notebook: 
+> In this section I am going to evaluate the sex of all samples using a modified version of the ewastools check_sex() function. The only reason I'm modifying/writing my own code for this section rather than using the ewastools functions is that the ewastools package for this step requires you to re-read in the IDATs into an object of their specific format that is basically equivalent to an rgset. To me this seems redundant and also not memory-efficient if you already have an rgset loaded, so I modified the code to work with an rgset directly.
+
+```{r}
+robinson_check_sex <- function(rgset) {
+  methylation_signal_noob <- minfi::preprocessNoob(rgset)
+  
+  # get total intensities for each of the methylated/unmethylated detection probes
+  methylated_intensities <- minfi::getMeth(methylation_signal_noob)
+  unmethylated_intensities <- minfi::getUnmeth(methylation_signal_noob)
+  
+  # get the total intensity per probe type (X, Y, autosomal)
+  # this is adopted from the code for ewastools:check_sex()
+  chrX_intensities <- (
+    methylated_intensities[rownames(methylated_intensities) %in% chrX_probes$probeID] + 
+    unmethylated_intensities[rownames(unmethylated_intensities) %in% chrX_probes$probeID]
+  )
+  chrY_intensities <- (
+    methylated_intensities[rownames(methylated_intensities) %in% chrY_probes$probeID] + 
+    unmethylated_intensities[rownames(unmethylated_intensities) %in% chrY_probes$probeID]
+  )
+  autosomal_intensities <- (
+    methylated_intensities[rownames(methylated_intensities) %in% autosomal_probes$probeID] + 
+    unmethylated_intensities[rownames(unmethylated_intensities) %in% autosomal_probes$probeID]
+  )
+  
+  # compute per sample average intensities
+  chrX_intensities <- colMeans(chrX_intensities)
+  chrY_intensities <- colMeans(chrY_intensities)
+  autosomal_intensities <- colMeans(autosomal_intensities)
+}
+```
+```{r}
+methylated_intensities <- minfi::getMeth(rgset)
+unmethylated_intensities <- minfi::getUnmeth(rgset)
+```
+
