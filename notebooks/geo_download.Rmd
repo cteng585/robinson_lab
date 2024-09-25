@@ -79,12 +79,10 @@ done
 ## Load the .IDAT Files into an S4 object
 
 ```{r echo = FALSE}
-requireNamespace("minfi")
-
 rgset <- minfi::read.metharray.exp("~/github_repos/robinson_lab/bin/GSE115508/")
 
 # alternatively load from RDS
-rgset <- loadRDS("~/github_repos/robinson_lab/bin/GSE115508.rds")
+rgset <- readRDS("~/github_repos/robinson_lab/bin/GSE115508.rds")
 ```
 
 ## View the S4 Object
@@ -389,8 +387,25 @@ ggplot2::ggplot(
 From original notebook: 
 > In this section I am going to evaluate the sex of all samples using a modified version of the ewastools check_sex() function. The only reason I'm modifying/writing my own code for this section rather than using the ewastools functions is that the ewastools package for this step requires you to re-read in the IDATs into an object of their specific format that is basically equivalent to an rgset. To me this seems redundant and also not memory-efficient if you already have an rgset loaded, so I modified the code to work with an rgset directly.
 
+This code chunk is adapted from the [ewastools github repository](https://github.com/hhhh5/ewastools/blob/master/R/check_sex.R). The `check_sex` function returns a list of normalized average intensities for probes targeting the X and Y chromosomes.
+
 ```{r}
-robinson_check_sex <- function(rgset) {
+robinson_check_sex <- function(rgset, probe_info) {
+  # add additional field for probe ID
+  probe_info$probeID <- rownames(probe_info)
+  
+  # get subset of probes to yield X chr probes, Y chr probes, and autosomal probes
+  # https://github.com/tidyverse/dplyr/issues/6256 - filter might be slower than base R
+  
+  # chrX_probes <- probe_info[probe_info["chr"] == "chrX", ]
+  chrX_probes <- probe_info %>% filter(chr == "chrX")
+  
+  # chrY_probes <- probe_info[probe_info["chr"] == "chrY", ]
+  chrY_probes <- probe_info %>% filter(chr == "chrY")
+  
+  # autosomal_probes <- probe_info[!(probe_info[["chr"]] %in% c("chrX", "chrY")), ]
+  autosomal_probes <- probe_info %>% filter(!(chr %in% c("chrX", "chrY")))
+
   methylation_signal_noob <- minfi::preprocessNoob(rgset)
   
   # get total intensities for each of the methylated/unmethylated detection probes
@@ -400,26 +415,67 @@ robinson_check_sex <- function(rgset) {
   # get the total intensity per probe type (X, Y, autosomal)
   # this is adopted from the code for ewastools:check_sex()
   chrX_intensities <- (
-    methylated_intensities[rownames(methylated_intensities) %in% chrX_probes$probeID] + 
-    unmethylated_intensities[rownames(unmethylated_intensities) %in% chrX_probes$probeID]
+    methylated_intensities[rownames(methylated_intensities) %in% chrX_probes$probeID, ] + 
+    unmethylated_intensities[rownames(unmethylated_intensities) %in% chrX_probes$probeID, ]
   )
   chrY_intensities <- (
-    methylated_intensities[rownames(methylated_intensities) %in% chrY_probes$probeID] + 
-    unmethylated_intensities[rownames(unmethylated_intensities) %in% chrY_probes$probeID]
+    methylated_intensities[rownames(methylated_intensities) %in% chrY_probes$probeID, ] + 
+    unmethylated_intensities[rownames(unmethylated_intensities) %in% chrY_probes$probeID, ]
   )
   autosomal_intensities <- (
-    methylated_intensities[rownames(methylated_intensities) %in% autosomal_probes$probeID] + 
-    unmethylated_intensities[rownames(unmethylated_intensities) %in% autosomal_probes$probeID]
+    methylated_intensities[rownames(methylated_intensities) %in% autosomal_probes$probeID, ] + 
+    unmethylated_intensities[rownames(unmethylated_intensities) %in% autosomal_probes$probeID, ]
   )
   
   # compute per sample average intensities
   chrX_intensities <- colMeans(chrX_intensities)
   chrY_intensities <- colMeans(chrY_intensities)
   autosomal_intensities <- colMeans(autosomal_intensities)
+  
+  # normalize sex chromosome intensities
+  chrX_intensities <- chrX_intensities / autosomal_intensities
+  chrY_intensities <- chrY_intensities / autosomal_intensities
+  
+  return(list(X = chrX_intensities, Y = chrY_intensities))
 }
-```
-```{r}
-methylated_intensities <- minfi::getMeth(rgset)
-unmethylated_intensities <- minfi::getUnmeth(rgset)
+
+sex_chr_intensities <- robinson_check_sex(rgset)
 ```
 
+
+Sex chromosome intensities are passed to a function that predicts sex based on the normalized average total intensity of sex probes for samples
+```{r}
+robinson_predict_sex <- function(X, Y, female_index, male_index) {
+  # compute the robust Hodges-Lehmann estimator for the total intensity for X chr probes
+	cut_X = outer(X[male_index],X[female_index],"+")
+	cut_X = median(cut_X)/2
+
+	# ... likewise for Y chr probes
+	cut_Y = outer(Y[male_index],Y[female_index],"+")
+	cut_Y = median(cut_Y)/2
+
+	# Prediction is based the quadrant (cutX/cutY) in which a sample falls
+	# Samples in the upper right and lower left quadrant are assigned NA
+	# (though there could be Klinefelter samples or similar)
+	prediction = rep(NA,times=length(X))
+	prediction[X >= cut_X & Y <= cut_Y] =  "f"
+	prediction[X <= cut_X & Y >= cut_Y] =  "m"
+	
+	# return the predicted sex for each sample
+	return(factor(prediction,levels=c("m","f"),labels=c("m","f")))
+}
+
+# find what the encoding is for sex in the phenotype data
+print(unique(series_matrix[["Sex"]]))
+
+# get the indices of samples that are female and male
+female_index <- series_matrix[["Sex"]]  == "F"
+male_index <- series_matrix[["Sex"]] == "M"
+
+sample_predicted_sex <- robinson_predict_sex(
+  sex_chr_intensities$X, 
+  sex_chr_intensities$Y, 
+  female_index = female_index, 
+  male_index = male_index
+)
+```
