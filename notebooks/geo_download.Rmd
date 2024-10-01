@@ -8,7 +8,7 @@ author: "Chris Teng"
 
 Refactor of GEO Download notebook provided by Amy Inkster in the Robinson Lab
 
-# REQUIREMENTS
+# Requirements
 
 Required libraries for this notebook
 
@@ -26,6 +26,7 @@ required_packages <- list(
   c("IlluminaHumanMethylationEPICanno.ilm10b4.hg19", "bioconductor"),
   c("IlluminaHumanMethylationEPICmanifest", "bioconductor"),
   c("lumi", "bioconductor"),
+  c("wateRmelon", "bioconductor"),
   c("vctrs", "general"),
   c("purrr", "general"),
   c("hhhh5/ewastools", "github")
@@ -45,6 +46,11 @@ for (package in required_packages) {
 
 # have to make library call to overload the pipe `%>%` operator
 library(tidyverse)
+```
+
+# Setup
+```{r}
+work_dir <- "~/github_repos/robinson_lab/"
 ```
 
 
@@ -79,10 +85,10 @@ done
 ## Load the .IDAT Files into an S4 object
 
 ```{r echo = FALSE}
-rgset <- minfi::read.metharray.exp("~/github_repos/robinson_lab/bin/GSE115508/")
+rgset <- minfi::read.metharray.exp(paste(work_dir, "bin/GSE115508/", sep = ""))
 
 # alternatively load from RDS
-rgset <- readRDS("~/github_repos/robinson_lab/bin/GSE115508.rds")
+rgset <- readRDS(paste(work_dir, "bin/GSE115508.rds", sep = ""))
 ```
 
 ## View the S4 Object
@@ -126,11 +132,11 @@ head(green_probes)[,1:10]
 
 ## Save data to file
 ```{r echo = FALSE}
-saveRDS(rgset, file = "~/github_repos/robinson_lab/bin/GSE115508.rds")
+saveRDS(rgset, file = paste(work_dir, "bin/GSE115508.rds", sep = ""))
 ```
 
 
-# HEADER 2
+# Format Data to Process Methylation Data with
 
 ```{r echo = FALSE}
 # Manifest - probe names, addresses, type, experimental metadata
@@ -204,7 +210,7 @@ Start with the series matrix downloaded from GEO
 
 ```{r}
 series_matrix <- read.table(
-  "~/github_repos/robinson_lab/bin/GSE115508/GSE115508_series_matrix.txt",
+  paste(work_dir, "bin/GSE115508/GSE115508_series_matrix.txt", sep = ""),
   sep = "\t",
   skip = 31,
   nrows = 40,
@@ -267,10 +273,35 @@ series_matrix <- series_matrix %>% mutate(Sample_Name = str_replace(Sample_Name,
 series_matrix <- series_matrix[c("Sample_Name", head(colnames(series_matrix), -1))]
 
 # write to file
-write.csv(series_matrix, "~/github_repos/robinson_lab/bin/GSE115508_series_matrix_processed.csv", row.names=F)
+# write.csv(series_matrix, paste(work_dir, "bin/GSE115508_series_matrix_processed.csv", sep = ""), row.names=F)
 ```
 
-# Probe Filtering
+# Probe QC
+
+## Removal of known poor-quality probes
+
+```{r}
+# read in the Zhou annotation object (downloaded from their github website)
+# this is a list of CpG probes that are poor performing (the probe ID can be found in the field "probeID")
+zhou_annotation <- read.delim(paste(work_dir, "bin/EPIC.hg19.manifest.tsv", sep = ""), sep = "\t")
+
+# check str of new zhouAnno - no mutates, already has proper probeID column
+# chris: what is meant by "no mutates"?
+str(zhou_annotation)
+
+# can you determine out how many probes on the X and Y will be removed if we remove everything from the MASK_general column?
+masked_probes <- zhou_annotation %>% filter(MASK_general == TRUE)
+masked_sex_probes <- masked_probes %>% filter(chrm_A %in% c("chrX", "chrY") | chrm_B %in% c("chrX", "chrY"))
+table(masked_sex_probes)
+
+# remove masked probes
+filtered_probes <- zhou_annotation[zhou_annotation["MASK_general"] == FALSE, "probeID"] # these are the probes TO KEEP
+filtered_betas <- betas[rownames(betas) %in% filtered_probes, ]
+
+# double check that it worked
+removed_probes <- zhou_annotation[zhou_annotation["MASK_general"] == TRUE, "probeID"]
+any(rownames(filtered_betas) %in% removed_probes)
+```
 
 ## Initial Data Check
 
@@ -293,8 +324,121 @@ methylation_signal_raw <- minfi::preprocessRaw(rgset)
 
 # calculate the beta values of the methyaltion set per probe per sample
 betas <- getBeta(methylation_signal_raw)
+```
 
+### Plot the Betas
+
+Since there are so many probes, subset to chr X probes only before visualizing
+
+```{r}
+betas_r1 <- betas[, grepl("R01", colnames(betas))]
+
+betas_r1_probe_subset <- rownames_to_column(
+  as.data.frame(betas_r1), "probe_ids"
+) %>% pivot_longer(
+  cols = !probe_ids,
+  names_to = "sample_name",
+  values_to = "betas",
+) %>% filter(probe_ids %in% chrX_probes$probeID)
+
+# plot the betas
+betas_line_plot <- ggplot2::ggplot(
+  betas_r1_probe_subset,
+  aes(
+    x = probe_ids,
+    y = betas,
+    group = sample_name,
+    colour = sample_name
+  )
+) + 
+  geom_line() + 
+  theme_classic() + 
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+print(betas_line_plot)
+
+betas_box_plot <- ggplot2::ggplot(
+  betas_r1_probe_subset,
+  aes(
+    x = sample_name,
+    y = betas,
+    group = sample_name,
+    colour = sample_name
+  )
+) + 
+  geom_boxplot() + 
+  theme_classic() + 
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+print(betas_box_plot)
+```
+
+
+Do the same thing with the M-values
+
+```{r}
 m_values <- lumi::beta2m(betas)
+
+# subset the betas to have only one replicate per sample
+m_values_r1 <- as.data.frame(m_values[, grepl("R01", colnames(m_values))])
+
+# turn the betas into "tall" format
+m_values_r1_probe_subset <- rownames_to_column(
+  as.data.frame(m_values_r1), "probe_ids"
+) %>% pivot_longer(
+  cols = !probe_ids,
+  names_to = "sample_name",
+  values_to = "m_values",
+) %>% filter(probe_ids %in% chrX_probes$probeID)
+
+# plot the m-values
+m_value_line_plot <- ggplot2::ggplot(
+  m_values_r1_probe_subset,
+  aes(
+    x = probe_ids,
+    y = m_values,
+    group = sample_name,
+    colour = sample_name
+  )
+) + 
+  geom_line() + 
+  theme_classic() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+print(m_value_line_plot)
+
+m_value_box_plot <- ggplot2::ggplot(
+  m_values_r1_probe_subset,
+  aes(
+    x = sample_name,
+    y = m_values,
+    group = sample_name,
+    colour = sample_name
+  )
+) + 
+  geom_boxplot() + 
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+print(m_value_box_plot)
 ```
 
 ## Identity Checks
@@ -344,10 +488,14 @@ Questions:
 
 Why? Does this have to do with the "confidence" with which a genotype can be assigned to a given probe? Lower confidence -> more likely to be contaminated with another sample?
 
+**This is more to do if there are more genetic "replicates" identified when calling donors than actually exist. Then there's likely that there is some unaccounted for factor that's contributing to genetic similarity between samples.**
+
 ---
 > let's summarize this for each sample across all SNPs by taking the mean prob that each SNP is an outlier
 
 Why choose the mean as the most representative test statistic for the outlier probabilities for a given sample? The probabilities appear bi-modal for at least some of the samples so maybe the mean isn't the best choice?
+
+**Ella also not convinced. I think current practice is log odds of contamination across probes for a given sample rather than mean**
 
 ### Check how probability of outlier varies within the data
 
@@ -359,12 +507,19 @@ series_matrix$p_contamination <- prob_outlier
 # plot the mean probability of contamination per tissue
 ggplot2::ggplot(
   series_matrix, aes(x = Tissue, y = p_contamination, color = Tissue)
-) + geom_point(position = ggplot2::position_jitterdodge())
+) + 
+  # geom_point(position = ggplot2::position_jitterdodge()) +
+  geom_boxplot() + 
+  theme_classic()
 
 # plot the mean probability of contamination per group
-ggplot2::ggplot(
+print(ggplot2::ggplot(
   series_matrix, aes(x = Group, y = p_contamination, color = Group)
-) + geom_point(position = ggplot2::position_jitterdodge())
+) + 
+  geom_point(position = ggplot2::position_jitterdodge()) +
+  # geom_boxplot() + 
+  theme_classic()
+)
 
 # no real between-group difference in probability of contamination visually
 ```
@@ -376,6 +531,7 @@ ggplot2::ggplot(
 ) + 
   geom_point(position=position_jitterdodge()) + 
   geom_boxplot() + 
+  theme_classic() + 
   theme(
     axis.text.x = element_blank(),
     axis.ticks = element_blank()
@@ -439,7 +595,7 @@ robinson_check_sex <- function(rgset, probe_info) {
   return(list(X = chrX_intensities, Y = chrY_intensities))
 }
 
-sex_chr_intensities <- robinson_check_sex(rgset)
+sex_chr_intensities <- robinson_check_sex(rgset, probe_info)
 ```
 
 
@@ -458,11 +614,17 @@ robinson_predict_sex <- function(X, Y, female_index, male_index) {
 	# Samples in the upper right and lower left quadrant are assigned NA
 	# (though there could be Klinefelter samples or similar)
 	prediction = rep(NA,times=length(X))
-	prediction[X >= cut_X & Y <= cut_Y] =  "f"
-	prediction[X <= cut_X & Y >= cut_Y] =  "m"
+	prediction[X >= cut_X & Y <= cut_Y] =  "F"
+	prediction[X <= cut_X & Y >= cut_Y] =  "M"
 	
 	# return the predicted sex for each sample
-	return(factor(prediction,levels=c("m","f"),labels=c("m","f")))
+	return(
+	  list(
+	    predicted_sex = factor(prediction, levels = c("M","F"), labels = c("M","F")),
+	    x_intensity_estimator = cut_X,
+	    y_intensity_estimator = cut_Y
+    )
+  )
 }
 
 # find what the encoding is for sex in the phenotype data
@@ -472,10 +634,194 @@ print(unique(series_matrix[["Sex"]]))
 female_index <- series_matrix[["Sex"]]  == "F"
 male_index <- series_matrix[["Sex"]] == "M"
 
-sample_predicted_sex <- robinson_predict_sex(
+sex_predictions <- robinson_predict_sex(
   sex_chr_intensities$X, 
   sex_chr_intensities$Y, 
   female_index = female_index, 
   male_index = male_index
 )
+
+series_matrix$Predicted_Sex <- sex_predictions$predicted_sex
+
+# check if any predicted sex doesn't match the assigned sex
+sprintf("Any assigned sex doesn't match predicted sex: %s", any(series_matrix$Sex != series_matrix$Predicted_Sex))
+
+# plot the X & Y probe fluorescence for each sample
+ggplot2::ggplot(series_matrix, aes(x = sex_chr_intensities$X, y = sex_chr_intensities$Y, color = Predicted_Sex)) + 
+  geom_point() +
+  geom_hline(yintercept=sex_predictions$y_intensity_estimator) +
+  geom_vline(xintercept=sex_predictions$x_intensity_estimator) +
+  labs(title="Normalized Fluorescence Intensity",
+       y="chrY Fluorescence",
+       x="chrX Fluorescence",
+       color="Reported Sex") +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust=0.5),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    # axis.ticks.x = element_blank(),
+    # axis.ticks.y = element_blank(),
+    # axis.text.x = element_blank(),
+    # axis.text.y = element_blank()
+  )
+```
+
+Find the outlier male sample
+
+```{r}
+# M = 1, F = 2
+sample_id_intensities <- cbind(
+  series_matrix[, c("Sample_ID", "Predicted_Sex")],
+  sex_chr_intensities
+)
+predicted_male_intensities <- sample_id_intensities[sample_id_intensities["Predicted_Sex"] == "M", ]
+predicted_male_intensities[predicted_male_intensities$X > 0.8, ]
+```
+
+
+> Females contam with maternal will NOT show up on this check! (why not?)
+
+The males can be detected since we will see a higher chr X fluorescence than normal if they have maternal tissue infiltration/contamination. But since female is XX, you can't distinguish if the tissue is from the maternal or from the individual.
+
+# Predict cell composition and ancestry
+
+> In this section we are going to predict sample ancestry and cell composition with tools in Victor's planet package. We do this before probe filtering because we rely on probes for this step that are commonly removed later on. Specifically, planet's ancestry estimation understandably relies on the 56 SNP genotyping probes, as well as other probes near highly polymorphic SNP loci that get removed when we exclude polymorphic probes.  
+
+> To prep for this step, we first have to noob + BMIQ normalize our data (as recommended by Victor's package documentation, because this is how he treated the data that he built the predictors with). We have already noob-normalized, so we will take the output of noob normalization (the mset object) and BMIQ normalize it. All of this prerequisite info is documented in the package Vignette for your reference (don't need to read it all, the code is below, good to know for future though where this info is). Vignette here: http://bioconductor.org/packages/release/bioc/vignettes/planet/inst/doc/planet.html 
+
+
+## Get BMIQ adjusted beta-values
+
+```{r}
+# reversing the order of preprocess & BMIQ doesn't work since BMIQ needs a vector of beta values
+methylation_signal_noob <- minfi::preprocessNoob(rgset)
+betas_bmiq <- wateRmelon::BMIQ(methylation_signal_noob)
+```
+
+## Predict cell composition
+
+Dissect minfi::pickCompProbes since that appears to be what is driving the cell type deconvolution used by Planet
+
+```{r}
+# defining this here appears to perhaps overload the private function of the internal pickCompProbes function defined by minfi
+splitit <- function(x) {
+  return(
+    split(seq_along(x), x)
+  )
+}
+
+mSet <- minfi::preprocessNoob(rgset)
+
+p <- minfi::getBeta(mSet)
+pd <- as.data.frame(colData(mSet))
+
+View(pd)
+```
+
+```{r}
+# coefficient data for 3rd trimester samples for deconvolution
+# how was this data generated?
+# this data should be how close the data at the probe is to the methylation profile generated for each of the 6 cell types in the data package
+data("plCellCpGsThird", package = "planet")
+
+# this code calculates estimated cell proportions for 6 major cell types in each sample
+# chris: guessing that the reason why we're calling projectCellType directly is because the estimateCellCounts function from minfi doesn't include cell coefficients that are applicable for placenta?
+houseman_estimates <- minfi:::projectCellType(
+    betas_bmiq[rownames(plCellCpGsThird), ],
+    plCellCpGsThird,
+    lessThanOne = FALSE
+) %>% as.data.frame()
+
+# samples are rows, 6 cell type colums with relative proportions
+head(houseman_estimates)
+
+# add this to metadata, first need to reassign rownames to a column in houseman_estimates so we can join by this column to pDat
+houseman_estimates <- houseman_estimates %>% rownames_to_column(var="Sample_ID")
+series_matrix <- series_matrix %>% left_join(houseman_estimates, by="Sample_ID")
+```
+
+What is the cellular composition of the male outlier?
+```{r}
+male_outlier_comp <- houseman_estimates[houseman_estimates["Sample_ID"] == "GSM3179786_200925700117_R04C01", ]
+male_outlier_comp <- male_outlier_comp %>%
+  pivot_longer(
+    cols = !Sample_ID,
+    names_to = "cell_type",
+    values_to = "proportion"
+  )
+
+ggplot2::ggplot(
+  male_outlier_comp,
+  aes(
+    x = cell_type,
+    y = proportion,
+    colour = cell_type,
+    fill = cell_type
+  )
+) +
+  geom_col() + 
+  labs(
+    title = "Male Outlier Cell Proportions"
+  ) +
+  theme_classic() + 
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 0.9, hjust = 1)
+  )
+```
+
+Is this proportion of nRCBs abnormal for males?
+```{r}
+male_samples <- series_matrix[series_matrix$Predicted_Sex == "M", c("Sample_ID")]
+
+ggplot2::ggplot(
+  houseman_estimates[houseman_estimates$Sample_ID %in% male_samples$Sample_ID, ],
+  aes(
+    x = nRBC
+  )
+) + 
+  geom_density() + 
+  theme_classic() + 
+  annotate(
+    geom = "segment",
+    x = 0.07652605,
+    y = 3,
+    xend = 0.07652605,
+    yend = 1.5,
+    arrow = arrow(
+      angle = 25, 
+      ends = "last", 
+      type = "closed",
+      length = unit(0.1, "inches")
+    ),
+    colour = "red"
+  )
+```
+
+
+## Predict Ancestry
+
+```{r}
+# these are the probes for CpG regions that help determine ethnicity?
+data("ethnicityCpGs", package = "planet")
+
+# check if all ethnicityCpG probes are in the methylation data set
+# if not, which probes are missing?
+sprintf("All CpGs to determine ethnicity in methylation values? %s", all(ethnicityCpGs %in% rownames(betas_bmiq)))
+sprintf("Missing Probes: %s", ethnicityCpGs[!ethnicityCpGs %in% rownames(betas_bmiq)])
+
+# the missing probes are all SNP probes which are dropped by default during construction of the methylation beta values obj
+# concat the genotype probes to the methylation set to fix this
+# question: why are we allowed to do this? the SNP beta values haven't been normalized in the same way that the other probe intensities have been
+betas_planet <- rbind(betas_bmiq, genotype_probes)
+sprintf("All CpGs to determine ethnicity in methylation values? %s", all(ethnicityCpGs %in% rownames(betas_planet)))
+
+# predict ancestry
+planet_estimates <- planet::predictEthnicity(betas_planet)
+head(planet_estimates)
+
+# add to metadata
+series_matrix <- series_matrix %>% left_join(planet_estimates, by="Sample_ID")
+
+# heatmap of agreement between 
 ```
