@@ -3,6 +3,26 @@
     "Version": "4.4.1",
     "Repositories": [
       {
+        "Name": "BioCsoft",
+        "URL": "https://bioconductor.org/packages/3.19/bioc"
+      },
+      {
+        "Name": "BioCann",
+        "URL": "https://bioconductor.org/packages/3.19/data/annotation"
+      },
+      {
+        "Name": "BioCexp",
+        "URL": "https://bioconductor.org/packages/3.19/data/experiment"
+      },
+      {
+        "Name": "BioCworkflows",
+        "URL": "https://bioconductor.org/packages/3.19/workflows"
+      },
+      {
+        "Name": "BioCbooks",
+        "URL": "https://bioconductor.org/packages/3.19/books"
+      },
+      {
         "Name": "CRAN",
         "URL": "https://ftp.osuosl.org/pub/cran"
       }
@@ -32,6 +52,30 @@
       ],
       "Hash": "b7df9c597fb5533fc8248d73b8c703ac"
     },
+    "AnnotationHub": {
+      "Package": "AnnotationHub",
+      "Version": "3.12.0",
+      "Source": "Bioconductor",
+      "Repository": "Bioconductor 3.19",
+      "Requirements": [
+        "AnnotationDbi",
+        "BiocFileCache",
+        "BiocGenerics",
+        "BiocManager",
+        "BiocVersion",
+        "RSQLite",
+        "S4Vectors",
+        "curl",
+        "dplyr",
+        "grDevices",
+        "httr",
+        "methods",
+        "rappdirs",
+        "utils",
+        "yaml"
+      ],
+      "Hash": "346ca347b61989d1da5f655d7bac6a8c"
+    },
     "BH": {
       "Package": "BH",
       "Version": "1.84.0-0",
@@ -51,6 +95,26 @@
         "utils"
       ],
       "Hash": "9bc4cabd3bfda461409172213d932813"
+    },
+    "BiocFileCache": {
+      "Package": "BiocFileCache",
+      "Version": "2.12.0",
+      "Source": "Bioconductor",
+      "Repository": "Bioconductor 3.19",
+      "Requirements": [
+        "DBI",
+        "R",
+        "RSQLite",
+        "curl",
+        "dbplyr",
+        "dplyr",
+        "filelock",
+        "httr",
+        "methods",
+        "stats",
+        "utils"
+      ],
+      "Hash": "9c3414bcfae204d56080dd0f0a220136"
     },
     "BiocGenerics": {
       "Package": "BiocGenerics",
@@ -186,6 +250,23 @@
       ],
       "Hash": "5d9536664ccddb0eaa68a90afe4ee76e"
     },
+    "ExperimentHub": {
+      "Package": "ExperimentHub",
+      "Version": "2.12.0",
+      "Source": "Bioconductor",
+      "Repository": "Bioconductor 3.19",
+      "Requirements": [
+        "AnnotationHub",
+        "BiocFileCache",
+        "BiocGenerics",
+        "BiocManager",
+        "S4Vectors",
+        "methods",
+        "rappdirs",
+        "utils"
+      ],
+      "Hash": "988693270e5886a33c536dda6b3c9f98"
+    },
     "FDb.InfiniumMethylation.hg19": {
       "Package": "FDb.InfiniumMethylation.hg19",
       "Version": "2.2.0",
@@ -199,6 +280,55 @@
         "org.Hs.eg.db"
       ],
       "Hash": "a11e10510f7fce066f863a98501d1332"
+    },
+    "FlowSorted.Blood.450k": {
+      "Package": "FlowSorted.Blood.450k",
+      "Version": "1.42.0",
+      "Source": "Bioconductor",
+      "Repository": "Bioconductor 3.19",
+      "Requirements": [
+        "R",
+        "minfi"
+      ],
+      "Hash": "b979eb53503aff0280cec3b9fac15607"
+    },
+    "FlowSorted.Blood.EPIC": {
+      "Package": "FlowSorted.Blood.EPIC",
+      "Version": "2.8.0",
+      "Source": "Bioconductor",
+      "Repository": "Bioconductor 3.19",
+      "Requirements": [
+        "AnnotationHub",
+        "ExperimentHub",
+        "R",
+        "S4Vectors",
+        "SummarizedExperiment",
+        "genefilter",
+        "graphics",
+        "minfi",
+        "nlme",
+        "quadprog",
+        "stats",
+        "utils"
+      ],
+      "Hash": "b62d7ffba5767542742040bf46e534e4"
+    },
+    "FlowSorted.CordBloodCombined.450k": {
+      "Package": "FlowSorted.CordBloodCombined.450k",
+      "Version": "1.20.0",
+      "Source": "Bioconductor",
+      "Repository": "Bioconductor 3.19",
+      "Requirements": [
+        "AnnotationHub",
+        "ExperimentHub",
+        "IlluminaHumanMethylation450kanno.ilmn12.hg19",
+        "IlluminaHumanMethylationEPICanno.ilm10b4.hg19",
+        "R",
+        "SummarizedExperiment",
+        "minfi",
+        "utils"
+      ],
+      "Hash": "f18e30ea38bdecf71f8d6ff74f870ff6"
     },
     "GEOquery": {
       "Package": "GEOquery",
@@ -371,16 +501,6 @@
       ],
       "Hash": "ec220e7a0e01f7167413bb91690e006a"
     },
-    "IlluminaHumanMethylationEPICmanifest": {
-      "Package": "IlluminaHumanMethylationEPICmanifest",
-      "Version": "0.3.0",
-      "Source": "Bioconductor",
-      "Requirements": [
-        "R",
-        "minfi"
-      ],
-      "Hash": "ce8b29912b1b14c04f4381d38b22b161"
-    },
     "KEGGREST": {
       "Package": "KEGGREST",
       "Version": "1.44.1",
@@ -532,17 +652,6 @@
         "utils"
       ],
       "Hash": "0575eae3528baa5fb5e0117ae98cc627"
-    },
-    "RPMM": {
-      "Package": "RPMM",
-      "Version": "1.25",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "cluster"
-      ],
-      "Hash": "30e766c6a53c90830cb5313a1c57df7d"
     },
     "RSQLite": {
       "Package": "RSQLite",
@@ -1049,20 +1158,6 @@
       ],
       "Hash": "3f038e5ac7f41d4ac41ce658c85e3042"
     },
-    "cluster": {
-      "Package": "cluster",
-      "Version": "2.1.6",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "grDevices",
-        "graphics",
-        "stats",
-        "utils"
-      ],
-      "Hash": "0aaa05204035dc43ea0004b9c76611dd"
-    },
     "codetools": {
       "Package": "codetools",
       "Version": "0.2-20",
@@ -1407,6 +1502,16 @@
       "Source": "Repository",
       "Repository": "CRAN",
       "Hash": "aa5e1cd11c2d15497494c5292d7ffcc8"
+    },
+    "filelock": {
+      "Package": "filelock",
+      "Version": "1.0.3",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Requirements": [
+        "R"
+      ],
+      "Hash": "192053c276525c8495ccfd523aa8f2d1"
     },
     "fontawesome": {
       "Package": "fontawesome",
@@ -2415,20 +2520,6 @@
         "withr"
       ],
       "Hash": "2ec30ffbeec83da57655b850cf2d3e0e"
-    },
-    "planet": {
-      "Package": "planet",
-      "Version": "1.12.0",
-      "Source": "Bioconductor",
-      "Repository": "Bioconductor 3.19",
-      "Requirements": [
-        "R",
-        "dplyr",
-        "magrittr",
-        "methods",
-        "tibble"
-      ],
-      "Hash": "8110bc6fddede9916f4ad610d4c86c7c"
     },
     "plogr": {
       "Package": "plogr",
