@@ -57,6 +57,9 @@ rsconnect/
 # Anything in bin/ since this might contain sensitive data
 bin/
 
+# Anything that was directy transferred
+transfer/
+
 # After the initial commit, do not include any additional changes to the initial reference .Rmd notebooks
 notebooks/01_aCA_GEODownload.Rmd
 notebooks/02_aCA_Processing.Rmd
