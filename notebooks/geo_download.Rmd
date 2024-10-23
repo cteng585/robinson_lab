@@ -1,12 +1,15 @@
 ---
-title: "aCA GEO Download"
+title: "Cell Deconvolution"
 author: "Chris Teng"
+output:
   html_document:
     toc: true
     toc_float: true
+params:
+  work_dir: "~/github_repos/robinson_lab/"
 ---
 
-Refactor of GEO Download notebook provided by Amy Inkster in the Robinson Lab
+Adaptation of reference notebooks provided by Amy Inkster in the Robinson Lab
 
 # Requirements
 
@@ -29,7 +32,8 @@ required_packages <- list(
   c("wateRmelon", "bioconductor"),
   c("vctrs", "general"),
   c("purrr", "general"),
-  c("hhhh5/ewastools", "github")
+  c("hhhh5/ewastools", "github"),
+  c("wvictor14/planet", "github")
 )
 for (package in required_packages) {
   package_name = package[1]
@@ -48,21 +52,13 @@ for (package in required_packages) {
 library(tidyverse)
 ```
 
-# Setup
-```{r}
-work_dir <- "~/github_repos/robinson_lab/"
-```
-
-
 # File Download and Sanity Checks
 
-File is located at https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE115508&format=file
+The file containing the raw .idat files is located at https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE115508&format=file
 
 Download and rename to GSE115508_RAW.tar if necessary
 
-The following code snippets should work for macOS and Linux. Not sure if Windows Powershell has these utilities installed by default
-
-Result should be all .idat files and metadata have been extracted to the directory GSE115508
+The following code snippets should work for macOS and Linux. The result should be .idat files and metadata that have been extracted to the directory **GSE115508**
 
 ```{bash echo = FALSE}
 // the contents of the tarball are all .idat.gz archives
@@ -85,19 +81,13 @@ done
 ## Load the .IDAT Files into an S4 object
 
 ```{r echo = FALSE}
-rgset <- minfi::read.metharray.exp(paste(work_dir, "bin/GSE115508/", sep = ""))
+rgset <- minfi::read.metharray.exp(paste(params$work_dir, "bin/GSE115508/", sep = ""))
 
 # alternatively load from RDS
-rgset <- readRDS(paste(work_dir, "bin/GSE115508.rds", sep = ""))
+rgset <- readRDS(paste(params$work_dir, "bin/GSE115508.rds", sep = ""))
 ```
 
-## View the S4 Object
-
-```{r echo = FALSE}
-View(rgset)
-```
-
-### Basic EDA
+## Basic EDA
 
 How many probes and samples are in this rgset?
 ```{r echo = FALSE}
@@ -132,7 +122,7 @@ head(green_probes)[,1:10]
 
 ## Save data to file
 ```{r echo = FALSE}
-saveRDS(rgset, file = paste(work_dir, "bin/GSE115508.rds", sep = ""))
+saveRDS(rgset, file = paste(params$work_dir, "bin/GSE115508.rds", sep = ""))
 ```
 
 
@@ -210,7 +200,7 @@ Start with the series matrix downloaded from GEO
 
 ```{r}
 series_matrix <- read.table(
-  paste(work_dir, "bin/GSE115508/GSE115508_series_matrix.txt", sep = ""),
+  paste(params$work_dir, "bin/GSE115508/GSE115508_series_matrix.txt", sep = ""),
   sep = "\t",
   skip = 31,
   nrows = 40,
@@ -273,35 +263,10 @@ series_matrix <- series_matrix %>% mutate(Sample_Name = str_replace(Sample_Name,
 series_matrix <- series_matrix[c("Sample_Name", head(colnames(series_matrix), -1))]
 
 # write to file
-# write.csv(series_matrix, paste(work_dir, "bin/GSE115508_series_matrix_processed.csv", sep = ""), row.names=F)
+# write.csv(series_matrix, paste(params$work_dir, "bin/GSE115508_series_matrix_processed.csv", sep = ""), row.names=F)
 ```
 
 # Probe QC
-
-## Removal of known poor-quality probes
-
-```{r}
-# read in the Zhou annotation object (downloaded from their github website)
-# this is a list of CpG probes that are poor performing (the probe ID can be found in the field "probeID")
-zhou_annotation <- read.delim(paste(work_dir, "bin/EPIC.hg19.manifest.tsv", sep = ""), sep = "\t")
-
-# check str of new zhouAnno - no mutates, already has proper probeID column
-# chris: what is meant by "no mutates"?
-str(zhou_annotation)
-
-# can you determine out how many probes on the X and Y will be removed if we remove everything from the MASK_general column?
-masked_probes <- zhou_annotation %>% filter(MASK_general == TRUE)
-masked_sex_probes <- masked_probes %>% filter(chrm_A %in% c("chrX", "chrY") | chrm_B %in% c("chrX", "chrY"))
-table(masked_sex_probes)
-
-# remove masked probes
-filtered_probes <- zhou_annotation[zhou_annotation["MASK_general"] == FALSE, "probeID"] # these are the probes TO KEEP
-filtered_betas <- betas[rownames(betas) %in% filtered_probes, ]
-
-# double check that it worked
-removed_probes <- zhou_annotation[zhou_annotation["MASK_general"] == TRUE, "probeID"]
-any(rownames(filtered_betas) %in% removed_probes)
-```
 
 ## Initial Data Check
 
@@ -325,6 +290,48 @@ methylation_signal_raw <- minfi::preprocessRaw(rgset)
 # calculate the beta values of the methyaltion set per probe per sample
 betas <- getBeta(methylation_signal_raw)
 ```
+
+## Removal of known poor-quality probes
+
+```{r}
+# read in the Zhou annotation object (downloaded from their github website)
+# this is a list of CpG probes that are poor performing (the probe ID can be found in the field "probeID")
+zhou_annotation <- read.delim(paste(params$work_dir, "bin/EPIC.hg19.manifest.tsv", sep = ""), sep = "\t")
+
+# determine out how many probes on the X and Y will be removed if all MASK_general probes are removed
+masked_probes <- zhou_annotation %>% filter(MASK_general == TRUE)
+masked_chrX_probes <- masked_probes %>% filter(chrm_A %in% c("chrX") | chrm_B %in% c("chrX"))
+masked_chrY_probes <- masked_probes %>% filter(chrm_A %in% c("chrY") | chrm_B %in% c("chrY"))
+
+sprintf("Num removed chrX probes: %s", length(unique(masked_chrX_probes$probeID)))
+sprintf("Num removed chrY probes: %s", length(unique(masked_chrY_probes$probeID)))
+
+# remove masked probes
+# these are the probes TO KEEP
+filtered_probes <- zhou_annotation[zhou_annotation["MASK_general"] == FALSE, "probeID"] 
+filtered_betas <- betas[rownames(betas) %in% filtered_probes, ]
+
+# double check that it worked
+removed_probes <- zhou_annotation[zhou_annotation["MASK_general"] == TRUE, "probeID"]
+any(rownames(filtered_betas) %in% removed_probes)
+```
+
+### Define a function to do this for other beta data sets
+```{r}
+zhou_mask <- function(betas, masking_annotation_file) {
+  masking_annotation <- read.delim(masking_annotation_file, sep = "\t")
+  filtered_probes <- zhou_annotation[zhou_annotation["MASK_general"] == FALSE, "probeID"]
+  filtered_betas <- betas[rownames(betas) %in% filtered_probes, ]
+  
+  removed_probes <- zhou_annotation[zhou_annotation["MASK_general"] == TRUE, "probeID"]
+  if (any(rownames(filtered_betas) %in% removed_probes)) {
+    stop("Probes that were supposed to be masked by the masking annotation were not")
+  }
+  
+  return(filtered_betas)
+}
+```
+
 
 ### Plot the Betas
 
@@ -697,11 +704,16 @@ The males can be detected since we will see a higher chr X fluorescence than nor
 # reversing the order of preprocess & BMIQ doesn't work since BMIQ needs a vector of beta values
 methylation_signal_noob <- minfi::preprocessNoob(rgset)
 betas_bmiq <- wateRmelon::BMIQ(methylation_signal_noob)
+
+# filter out bad probes
+betas_bmiq <- zhou_mask(betas_bmiq, paste(params$work_dir, "bin/EPIC.hg19.manifest.tsv", sep = ""))
 ```
 
 ## Predict cell composition
 
 Dissect minfi::pickCompProbes since that appears to be what is driving the cell type deconvolution used by Planet
+
+## Preprocess data for pickCompProbes
 
 ```{r}
 # defining this here appears to perhaps overload the private function of the internal pickCompProbes function defined by minfi
@@ -711,6 +723,167 @@ splitit <- function(x) {
   )
 }
 
+# we will use the included artificial mixture data to test this function since that's what the minfi platform was developed on
+
+rgSet <- FlowSorted.Blood.EPIC[FlowSorted.Blood.EPIC$CellType == "MIX", ]
+
+# setup initial args
+# compositeCellType is the input data tissue type. can check using unique(FlowSorted.Blood.EPIC$CellType)
+compositeCellType <- "Blood"
+
+# the reference platform and input data platform should match
+# can use minfi::convertArray if it doesn't
+referencePlatform <- "IlluminaHumanMethylationEPIC"
+rgPlatform <- sub(
+  "IlluminaHumanMethylation",
+  "",
+  annotation(rgSet)[which(names(annotation(rgSet)) == "array")]
+)
+platform <- sub("IlluminaHumanMethylation", "", referencePlatform)
+
+# this is the reference package that will be loaded
+# the set of "FlowSorted.%s.%s" data packages can be installed from BiocManager
+# e.g. BiocManager::install("FlowSorted.Blood.EPIC")
+referencePkg <- sprintf("FlowSorted.%s.%s", compositeCellType, platform)
+referenceRGset <- FlowSorted.Blood.EPIC::libraryDataGet(referencePkg)
+
+# some checks that are done for the incoming reference data
+if (rgPlatform != platform) {
+    rgSet <- convertArray(
+        object = rgSet,
+        outType = referencePlatform,
+        verbose = subverbose)
+}
+if (!"CellType" %in% names(colData(referenceRGset))) {
+    stop(
+      sprintf(
+        "the reference sorted dataset (in this case '%s') needs to have a phenoData column called 'CellType'"
+      ), 
+      names(referencePkg)
+    )
+}
+if (sum(colnames(rgSet) %in% colnames(referenceRGset)) > 0) {
+    stop(
+      "the sample/column names in the user set must not be in the reference data"
+    )
+}
+if (!all(cellTypes %in% referenceRGset$CellType)) {
+    stop(
+      sprintf(
+        "all elements of argument 'cellTypes' needs to be part of the ",
+        "referencephenoData columns 'CellType' (containg the following ",
+        "elements: '%s')",
+        paste(unique(referenceRGset$cellType), collapse = "', '")
+      )
+    )
+}
+if (length(unique(cellTypes)) < 2) {
+    stop("At least 2 cell types must be provided.")
+}
+
+# determine the normalization method to use on both the reference and input RGChannelSets
+if ((processMethod == "auto") &&
+    (compositeCellType %in% c("Blood", "DLPFC"))) {
+    processMethod <- "preprocessQuantile"
+}
+if ((processMethod == "auto") &&
+    (!compositeCellType %in% c("Blood", "DLPFC"))) {
+    processMethod <- "preprocessNoob"
+}
+processMethod <- get(processMethod)
+
+# determine how explanatory probes will be selected for deconvoluting cell type
+if ((probeSelect == "auto") && (compositeCellType == "CordBlood")) {
+    probeSelect <- "any"
+}
+if ((probeSelect == "auto") && (compositeCellType != "CordBlood")) {
+    probeSelect <- "both"
+}
+
+# initial data ingestion finished
+
+```
+
+## Create methylation data sets
+
+By default, minfi takes RGChannelSets, not beta value sets or methylation sets, when estimating cell counts. However, when it creates the set of coefficients to estimate cell proportions by, it combines the reference and input data sets before normalizing. 
+
+Check if removing one of these two components changes the normalized methylation values, and if so, whether or not the output cell coefficients are changed.
+
+```{r}
+# combine the reference and input data sets to preprocess together
+# following comment is from minfi
+if (verbose) {
+  message("[estimateCellCounts] Combining user data with reference ",
+          "(flow sorted) data.\n")
+}
+
+combined_metadata_pd <- DataFrame(
+  sampleNames = c(colnames(rgset), colnames(referenceRGset)),
+  studyIndex = rep(
+    x = c("user", "reference"
+  ),
+  times = c(ncol(rgset), ncol(referenceRGset))),
+  stringsAsFactors = FALSE
+)
+combinedRGset <- minfi::combineArrays(
+  object1 = rgset,
+  object2 = referenceRGset,
+  outType = "IlluminaHumanMethylationEPIC"
+)
+colData(combinedRGset) <- combined_metadata_pd
+colnames(combinedRGset) <- combined_metadata_pd$sampleNames
+
+# used later to extract normalized data
+referencePd <- colData(referenceRGset)
+
+ref_only_pd <- DataFrame(
+  sampleNames = colnames(referenceRGset),
+  studyIndex = rep(
+    x = "reference",
+    times = ncol(referenceRGset),
+  ),
+  stringsAsFactors = FALSE
+)
+ref_only_rgset <- minfi::convertArray(
+  referenceRGset,
+  outType = "IlluminaHumanMethylationEPIC"
+)
+colData(referenceRGset) <- ref_only_pd
+colnames(referenceRGset) <- ref_only_pd$sampleNames
+
+# guessing the original code removes this for space considerations?
+# rm(referenceRGset)
+
+if (verbose) {
+    message("[estimateCellCounts] Processing user and reference data ",
+            "together.\n")
+}
+
+# original code below - commented out since it's not useful in our case
+# if (compositeCellType == "CordBlood") {
+#     # NOTE: Here Shan wants to discard probes that they have decided
+#     #       shouldn't be used, for example multi-mapping probes. This is
+#     #       done by only using probes with names in the comptable.
+#     #       This is kind of ugly, and dataset dependent.
+#     combinedMset <- processMethod(combinedRGset, verbose = subverbose)
+#     compTable <- get(paste0(referencePkg, ".compTable"))
+#     combinedMset <- combinedMset[
+#         which(rownames(combinedMset) %in% rownames(compTable)),]
+# } else {
+#     combinedMset <- processMethod(combinedRGset)
+# }
+combinedMset <- processMethod(combinedRGset)
+refMset <- processMethod(referenceRGset)
+
+# compare the normalized methylation values of ref vs ref + input
+combined_probes <- rownames(combinedRGset)
+ref_probes <- rownames(refMset)
+shared_probes <- intersect(ref_probes, combined_probes)
+
+# ---
+  
+  
 mSet <- minfi::preprocessNoob(rgset)
 
 p <- minfi::getBeta(mSet)
@@ -726,9 +899,9 @@ View(pd)
 data("plCellCpGsThird", package = "planet")
 
 # this code calculates estimated cell proportions for 6 major cell types in each sample
-# chris: guessing that the reason why we're calling projectCellType directly is because the estimateCellCounts function from minfi doesn't include cell coefficients that are applicable for placenta?
+# note that this is only performed using probes that have NOT been masked for poor quality
 houseman_estimates <- minfi:::projectCellType(
-    betas_bmiq[rownames(plCellCpGsThird), ],
+    masked_betas_bmiq[rownames(plCellCpGsThird)[rownames(plCellCpGsThird) %in% rownames(masked_betas_bmiq)], ],
     plCellCpGsThird,
     lessThanOne = FALSE
 ) %>% as.data.frame()
@@ -770,7 +943,7 @@ ggplot2::ggplot(
   )
 ```
 
-Is this proportion of nRCBs abnormal for males?
+Is this proportion of nRBCs abnormal for males?
 ```{r}
 male_samples <- series_matrix[series_matrix$Predicted_Sex == "M", c("Sample_ID")]
 
@@ -799,29 +972,31 @@ ggplot2::ggplot(
 ```
 
 
-## Predict Ancestry
+# Assessment of Outliers
 
+## Contamination Outliers
+
+By visual inspection, the outliers by tissue are:
+  - Amnion: GSM3179770_200925700078_R03C01, GSM3179761_200925700077_R02C01
+  - Chorion: GSM3179790_200925700117_R08C01
+  - Chorionic Villi: GSM3179756_200925700033_R05C01
+ 
+By visual inspection, the outliers by pathogenic phenotype are:
+  - Non-chorioamnionitis: GSM3179756_200925700033_R05C01
+  - Chorioamnionitis: GSM3179790_200925700117_R08C01, GSM3179770_200925700078_R03C01, GSM3179761_200925700077_R02C01
+ 
+
+Retrieve phenotypic information associated with each sample
 ```{r}
-# these are the probes for CpG regions that help determine ethnicity?
-data("ethnicityCpGs", package = "planet")
+outliers <- c(
+  "GSM3179770_200925700078_R03C01",
+  "GSM3179761_200925700077_R02C01",
+  "GSM3179790_200925700117_R08C01",
+  "GSM3179756_200925700033_R05C01"
+)
 
-# check if all ethnicityCpG probes are in the methylation data set
-# if not, which probes are missing?
-sprintf("All CpGs to determine ethnicity in methylation values? %s", all(ethnicityCpGs %in% rownames(betas_bmiq)))
-sprintf("Missing Probes: %s", ethnicityCpGs[!ethnicityCpGs %in% rownames(betas_bmiq)])
-
-# the missing probes are all SNP probes which are dropped by default during construction of the methylation beta values obj
-# concat the genotype probes to the methylation set to fix this
-# question: why are we allowed to do this? the SNP beta values haven't been normalized in the same way that the other probe intensities have been
-betas_planet <- rbind(betas_bmiq, genotype_probes)
-sprintf("All CpGs to determine ethnicity in methylation values? %s", all(ethnicityCpGs %in% rownames(betas_planet)))
-
-# predict ancestry
-planet_estimates <- planet::predictEthnicity(betas_planet)
-head(planet_estimates)
-
-# add to metadata
-series_matrix <- series_matrix %>% left_join(planet_estimates, by="Sample_ID")
-
-# heatmap of agreement between 
+outlier_phenotypic_data <- series_matrix[
+  series_matrix[["Sample_ID"]] %in% outliers, 
+]
 ```
+
