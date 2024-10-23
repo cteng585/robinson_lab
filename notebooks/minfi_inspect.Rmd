@@ -1,0 +1,897 @@
+---
+title: "minfi inspection"
+author: "Chris Teng"
+date: "2024-10-09"
+output: html_document
+params:
+  work_dir: "~/github_repos/robinson_lab/"
+---
+
+# Setup
+
+Installation and loading of library dependencies for minfi
+
+```{r setup, include=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("devtools", quietly = TRUE)) {
+  install.packages("devtools")
+}
+
+required_packages <- list(
+  c("minfi", "bioconductor"),
+  c("minfiData", "bioconductor"),
+  c("IlluminaHumanMethylationEPICanno.ilm10b4.hg19", "bioconductor"),
+  c("FlowSorted.Blood.450k", "bioconductor"),
+  c("FlowSorted.Blood.EPIC", "bioconductor")
+)
+
+for (package in required_packages) {
+  package_name = package[1]
+  source_name = package[2]
+  
+  if ((source_name == "bioconductor") && !requireNamespace(package_name, quietly = TRUE)) {
+    BiocManager::install(package_name)
+  } else if ((source_name == "general") && !requireNamespace(package_name, quietly = TRUE)) {
+    install.packages(package_name)
+  } else if ((source_name == "github") && !requireNamespace(package_name, quietly = TRUE)) {
+    devtools::install_github(package_name)
+  }
+}
+
+library(dplyr)
+library(tidyr)
+```
+
+# Required Data
+
+Load the data that will be used to understand the minfi code
+
+Loading the reference data package takes a while
+
+```{r setup data}
+reference_pkg <- "FlowSorted.Blood.EPIC"
+in_platform <- "IlluminaHumanMethylationEPIC"
+
+rgset <- FlowSorted.Blood.450k::FlowSorted.Blood.450k
+reference_rgset <- FlowSorted.Blood.EPIC::libraryDataGet(reference_pkg)
+```
+
+# minfi Code
+
+## Initialialize Parameters
+
+```{r minfi parameters}
+# tissue type being deconvoluted
+compositeCellType = "Blood"
+
+# how to process the beta-values into M-values
+# per minfi documentation:
+# auto + blood/DLPFC -> preprocessQuantile
+# auto + anything else -> preprocessNoob
+processMethod = "preprocessNoob"
+
+# how to select probes to distinguish cell types
+# "both" -> equal number of probes (50) of hyper- and hypo-methylated sides with the greatest magnitude of effect
+# "any" -> 100 probes of the greates magnitude of effect, direction of effect not considered
+# auto + blood -> "any"
+# auto + anything else -> "both"
+probeSelect = "both"
+
+# which cell types from reference object should be used for deconvolution
+cellTypes = c("CD8T", "CD4T", "NK", "Bcell", "Mono")
+
+# platform of reference
+# if platform of INPUT is different, the INPUT will be converted to match the REFERENCE
+reference_platform = reference_rgset@annotation["array"]
+```
+
+## Format checks
+
+```{r minfi setup}
+# make sure reference and input arrays are the same
+# minfi converts the input data set's array type to the reference
+rgset <- minfi::convertArray(
+  rgset,
+  outType = reference_platform["array"]
+)
+
+# do minfi checks to make sure that the input and reference RGChannelSets are compatible
+if (!"CellType" %in% names(colData(reference_rgset))) {
+  stop(
+    sprintf("the reference sorted dataset (in this case '%s') needs to have a phenoData column called 'CellType'"),
+    names(reference_pkg)
+  )
+}
+if (sum(colnames(rgset) %in% colnames(reference_rgset)) > 0) {
+  stop(
+    "the sample/column names in the user set must not be in the reference data "
+  )
+}
+if (!all(cellTypes %in% reference_rgset$CellType)) {
+  stop(
+    sprintf(
+      "all elements of argument 'cellTypes' needs to be part of the reference phenoData columns 'CellType' ",
+      "(containing   the following elements: '%s')",
+      paste(unique(reference_rgset$cellType), collapse = "', '")
+    )
+  )
+}
+if (length(unique(cellTypes)) < 2) {
+    stop("At least 2 cell types must be provided.")
+}
+```
+
+## Metadata Add
+
+```{r add/extract sample metadata}
+# add metadata to the RGChannelSet so that the m-set is aware of which study (input/reference) a measured m-value comes from
+# also extract the sample metadata from the reference data 
+sample_metadata <- DataFrame(
+  sampleNames = c(colnames(rgset), colnames(reference_rgset)),
+  studyIndex = rep(
+    x = c("user", "reference"),
+    times = c(ncol(rgset), ncol(reference_rgset))),
+  stringsAsFactors = FALSE
+)
+reference_metadata <- colData(reference_rgset)
+combined_rgset <- combineArrays(
+    object1 = rgset,
+    object2 = reference_rgset,
+    outType = reference_platform["array"])
+colData(combined_rgset) <- sample_metadata
+colnames(combined_rgset) <- sample_metadata$sampleNames
+```
+
+## Process beta values
+
+```{r data prep}
+# normalize beta values
+# param processMethod was set to preprocessNoob above but will call it explicitly here for clarity
+processMethod <- get("preprocessNoob")
+combined_mset <- processMethod(combined_rgset)
+
+# also make a mset of only the input data to double check that normalization values are not affected by the addition of reference data to preprocessNoob; should expect no difference since preprocessNoob is a within array normalization approach
+input_mset <- processMethod(rgset)
+
+# Extract normalized reference data
+reference_mset <- combined_mset[, combined_mset$studyIndex == "reference"]
+colData(reference_mset) <- as(reference_metadata, "DataFrame")
+user_mset <- combined_mset[, combined_mset$studyIndex == "user"]
+colData(user_mset) <- as(colData(rgset), "DataFrame")
+
+# remove the combined mset here, we can always recapitulate by concatenating the reference_mset and user_mset
+rm(combined_mset)
+```
+
+## (Optional) Compare M-values
+
+Double-checking whether processing reference beta-values into M-values changes if the reference beta-values are processed with/without the input data.
+
+Since Noob normalization is a within-array based normalization method, we should expect that the reference M-values remain the same regardless of if they are processed with/without the input data. 
+
+```{r m-value comparison user input}
+# visualize the distribution of differences in m-values between the beta values processed alone vs processed with reference
+m_vals_input <- minfi::getM(input_mset)
+m_vals_user <- minfi::getM(user_mset)
+
+# some probes don't appear in the "user" subset
+# remove them before comparing
+probe_diff <- union(
+  setdiff(rownames(m_vals_input), rownames(m_vals_user)),
+  setdiff(rownames(m_vals_user), rownames(m_vals_input))
+)
+sprintf(
+  "Any of the probes in the set diff in the user m-values extracted from the normalized m-values? %s", 
+  any(probe_diff %in% rownames(m_vals_user))
+)
+m_vals_input <- m_vals_input[!rownames(m_vals_input) %in% probe_diff, ]
+
+# get the absolute difference in m-values between the input and combined and visualize
+m_vals_diff <- as.data.frame(m_vals_user - m_vals_input)
+m_vals_diff <- tibble::rownames_to_column(m_vals_diff, var = "probe_id")
+m_vals_diff <- m_vals_diff %>%
+  pivot_longer(
+    cols = !probe_id,
+    names_to = "sample",
+    values_to = "diff"
+  )
+
+m_vals_diff_density <- ggplot2::ggplot(
+  m_vals_diff,
+  ggplot2::aes(
+    x = diff,
+    group = sample,
+    fill = sample
+  )
+) + 
+  ggplot2::geom_density() + 
+  ggplot2::labs(
+    x = "M-value difference"
+  ) + 
+  ggplot2::theme_classic() + 
+  ggplot2::theme(
+    legend.position = "none"
+  )
+
+# diff looks minimal, probably not worth worrying about
+m_vals_diff_density
+```
+
+```{r m-value comparison user input}
+# also check the reference m-values
+raw_reference_mset <- minfi::preprocessNoob(
+  reference_rgset[
+    rownames(reference_rgset) %in% rownames(combined_rgset), 
+  ]
+)
+
+# visualize the distribution of differences in m-values between the beta values processed alone vs processed with reference
+m_vals_raw_ref <- minfi::getM(raw_reference_mset)
+m_vals_combined_ref <- minfi::getM(reference_mset)
+
+# some probes don't appear in the "user" subset
+# remove them before comparing
+probe_diff <- union(
+  setdiff(rownames(m_vals_raw_ref), rownames(m_vals_combined_ref)),
+  setdiff(rownames(m_vals_combined_ref), rownames(m_vals_raw_ref))
+)
+sprintf(
+  "Any of the probes in the set diff in the extracted reference m-values? %s", 
+  any(probe_diff %in% rownames(m_vals_combined_ref))
+)
+
+# get the absolute difference in m-values between the input and combined and visualize
+m_vals_diff <- as.data.frame(m_vals_combined_ref - m_vals_raw_ref)
+m_vals_diff <- tibble::rownames_to_column(m_vals_diff, var = "probe_id")
+m_vals_diff <- m_vals_diff %>%
+  pivot_longer(
+    cols = !probe_id,
+    names_to = "sample",
+    values_to = "diff"
+  )
+
+m_vals_diff_density <- ggplot2::ggplot(
+  m_vals_diff,
+  ggplot2::aes(
+    x = diff,
+    group = sample,
+    fill = sample
+  )
+) + 
+  ggplot2::geom_density() + 
+  ggplot2::theme_classic() + 
+  ggplot2::labs(
+    x = "M-value difference"
+  ) + 
+  ggplot2::theme(
+    legend.position = "none"
+  )
+
+# M-values are identical
+m_vals_diff_density
+```
+
+## Pick Probes to Deconvolute
+
+### Check if the predictive probes are different
+
+Although the global magnitude of differences between M-values in the references processed WITH the input data and the reference processed WITHOUT the input data aren't that different, check to see if the probes that are determined as predictive of cell type are different
+
+```{r pickCompProbes}
+# we're going to use the reference alone vs the reference combined with input to see if, despite a minimal difference in m-value, the predictive probes picked differ
+predictive_probe_coeffs_raw <- minfi:::pickCompProbes(
+  mSet = raw_reference_mset,
+  cellTypes = cellTypes,
+  compositeCellType = compositeCellType,
+  probeSelect = probeSelect,
+  numProbes = 50
+)
+predictive_probes_raw <- predictive_probe_coeffs_raw$coefEsts
+
+predictive_probe_coeffs_combined <- minfi:::pickCompProbes(
+  mSet = reference_mset,
+  cellTypes = cellTypes,
+  compositeCellType = compositeCellType,
+  probeSelect = probeSelect, 
+  numProbes = 50
+)
+predictive_probes_combined <- predictive_probe_coeffs_combined$coefEsts
+
+predictive_probe_diff <- union(
+  setdiff(
+    rownames(predictive_probe_coeffs_raw$coefEsts), 
+    rownames(predictive_probe_coeffs_combined$coefEsts)
+  ),
+  setdiff(
+    rownames(predictive_probe_coeffs_combined$coefEsts),
+    rownames(predictive_probe_coeffs_raw$coefEsts)
+  )
+)
+predictive_probe_shared <- intersect(
+  rownames(predictive_probes_combined), 
+  rownames(predictive_probes_raw)
+)
+
+# this is quite different, more than 50% of the predictive probes change
+# for investigative purposes, try doing this with a data set that is more closely correlated i.e. the input data set
+sprintf(
+  "Proportion shared predictive probes in raw (%s/%s) | Proportion shared predictive probes in combined (%s/%s) | Symmetric difference of predictive probes (%s)",
+  length(predictive_probe_shared),
+  length(rownames(predictive_probes_raw)),
+  length(predictive_probe_shared),
+  length(rownames(predictive_probes_combined)),
+  length(predictive_probe_diff)
+)
+```
+
+**Conclusion: Predictive probes are the same, regardless of whether the reference was normalized with input or not. This makes sense given that it looks like pickCompProbes never uses the M-values. Instead, it gets the beta-values from the M-set and uses those to make the set of predictive probes. So the normalization method doesn't matter**
+
+# Inspecting `minfi`
+
+`pickCompProbes` appears to be the primary function by which cell estimation coefficient tables are generated. Inspect the code to see how it works.
+
+## Helper Functions
+
+`pickCompProbes` instantiates an internal utility functions that need to be defined for the function to work
+
+### splitit
+```{r}
+# get the row indices that match each level of a factor
+splitit <- function(x) {
+  split(seq_along(x), x)
+}
+
+# example: this should create a named list where each element contains the row indices in `reference_mset` that correspond to each cell type
+splitit(reference_mset$CellType)
+```
+
+`pickCompProbes` also uses an internal function called `validationCellType` which appears to do the majority of the work in producing cell type coefficients. However since it's a more involved function, it's separately inspected below.
+
+## pickCompProbes
+
+### params
+
+instantiating the parameters that are used in the function definition of `pickCompProbes`
+
+```{r inspect pickCompProbes params}
+# the M-value data set that's used to get the probes which can be used to estimate cell proportions in samples
+# note: this is ordinarily a reference set of a data
+mSet = reference_mset
+
+# the cell types that are expected to be deconvoluted out from sample(s). all of these cell types MUST be included in the reference set otherwise this function doesn't work
+cellTypes = cellTypes
+
+# the overall tissue (?) type that's being deconvoluted. in the native minfi::estimateCellCounts usage of 
+compositeCellType = compositeCellType
+
+# from comment above:
+# > # how to select probes to distinguish cell types
+# > "both" -> equal number of probes (50) of hyper- and hypo-methylated sides with the greatest magnitude of effect
+# > "any" -> 100 probes of the greates magnitude of effect, direction of effect not considered
+# > auto + blood -> "any"
+# > auto + anything else -> "both"
+probeSelect = probeSelect
+
+# numProbes is HALF the number of probes that will be selected for deconvolution of EACH cell type
+# i.e. if you are trying to get probes that can estimate the cellular proportions of B-cells, T-cells, and NK cells in a blood sample, pickCompProbes will return 300 probes to deconvolute data with:
+# 50 * 2 probes for B-cells
+# 50 * 2 probes for T-cells
+# 50 * 2 probes for NK cells
+# this is because if the probeSelect type is "both", pickCompProbes selects 50 probes for each of the hypo-/hyper-methylated sites
+# if the probeSelect type is "any" instead, the function interally multiples numProbes by 2 to get 100 probes with greatest effect size overall
+numProbes = 50
+```
+
+### code
+
+this is where the code for `pickCompProbes` is inspected
+
+```{r inspect pickCompProbes code}
+# go back to the betas for some reason?
+p <- getBeta(mSet)
+
+# pd will contain the sample level metadata for the reference data
+pd <- as.data.frame(colData(mSet))
+
+# the cellTypes arg is provided if it is desirable to only pick predictive probes for a subset of the input data
+# if this arg is provided, remove from the input data set the cell types that predictive probes are not needed for
+if (!is.null(cellTypes)) {
+  if (!all(cellTypes %in% pd$CellType))
+    stop("elements of argument 'cellTypes' is not part of ",
+         "'mSet$CellType'")
+  
+  # each row of pd corresponds to the metadata for a particular sample
+  # `keep` will be a vector of indices whose cell types are in the cell types that predictive probes should be made for
+  keep <- which(pd$CellType %in% cellTypes)
+  pd <- pd[keep,]
+  p <- p[,keep]
+}
+
+# a factor type is required for the genefilter::rowFtests function
+pd$CellType <- factor(pd$CellType, levels = cellTypes)
+
+# genefilter::rowFtests computes 3 matrices, all of the same dim as the input (here p). the matrices are defined as:
+# x - matrix of the original values
+# x0 - matrix of row means
+# x1 - matrix of factor means in each row
+#
+# genefilter::rowFtests then calculates the following variances:
+# rowSums(sqr(x1 - x0)) / dff -> between group variance FOR A ROW
+# rowSums(sqr( x - x1)) / dfr -> within group variance FOR A ROW
+# 
+# and then calculates the ratio of variances to generate the F-statistic
+# rowFtests repeats this for each probe and returns a dataframe of F-tests per probe with a p-value; the F-stat should say if the probe is good at segregating between groups (in this case samples) with a significance based on the p-value
+ffComp <- genefilter::rowFtests(p, pd$CellType, var.equal = TRUE)
+
+# X is a named list of the columns in p that correspond to each cell type
+# function(j) is applying rowMeans to a subset of p, only taking the columns specific to each cell type
+# FUN.VALUE is a template for how the output from FUN should look like; in this case we're expecting an NxD matrix of values for each cell type for each row
+prof <- vapply(
+  X = splitit(pd$CellType),
+  FUN = function(j) rowMeans2(p, cols = j),
+  FUN.VALUE = numeric(nrow(p))
+)
+
+r <- rowRanges(p)
+compTable <- cbind(ffComp, prof, r, abs(r[, 1] - r[, 2]))
+names(compTable)[1] <- "Fstat"
+names(compTable)[c(-2, -1, 0) + ncol(compTable)] <-
+    c("low", "high", "range")
+
+# for each cell type, do T-tests for each probe to test if the probe is good at segregating a cell type from other cell types
+# TODO: this might be the place to introduce an artifical mixture or outgroup to compare the other samples to in the t-test step, instead of doing row-wise and effectively comparing one group to all others
+tIndexes <- splitit(pd$CellType)
+tstatList <- lapply(
+  tIndexes, 
+  function(i) {
+    x <- rep(0,ncol(p))
+    x[i] <- 1
+    
+    # equivalent to t.test(p[row_idx, factor(x) == 0], p[row_idx, factor(x) == 1], var.equal = TRUE)
+    # i.e. a T-test with pooled variance on each row
+    return(genefilter::rowttests(p, factor(x)))
+  }
+)
+
+# filtering probes based on significance. note that the filtering is done on the T-stat, not the F-stat
+if (probeSelect == "any") {
+    probeList <- lapply(tstatList, function(x) {
+        y <- x[x[, "p.value"] < 1e-8, ]
+        yAny <- y[order(abs(y[, "dm"]), decreasing = TRUE), ]
+        c(rownames(yAny)[seq(numProbes * 2)])
+    })
+} else {
+    probeList <- lapply(tstatList, function(x) {
+        y <- x[x[, "p.value"] < 1e-8, ]
+        yUp <- y[order(y[, "dm"], decreasing = TRUE), ]
+        yDown <- y[order(y[, "dm"], decreasing = FALSE), ]
+        c(rownames(yUp)[seq_len(numProbes)],
+          rownames(yDown)[seq_len(numProbes)])
+    })
+}
+
+# concatenate all lists of probes that are able to distinguish each cell type
+trainingProbes <- unique(unlist(probeList))
+
+# filter out uninformative beta values
+p <- p[trainingProbes,]
+
+# get the mean beta value per sample, then label each sample as the representative cell type for that sample
+pMeans <- colMeans2(p)
+names(pMeans) <- pd$CellType
+
+# need to figure out what this -1 term is for
+form <- as.formula(
+    sprintf("y ~ %s - 1", paste(levels(pd$CellType), collapse = "+")))
+
+# create a design matrix that encodes the parameters that are used to predict the observed beta values for each probe
+# in the case of the deconvolution data, this would be the proportion of cells per sample which should be one-hot encoded
+phenoDF <- as.data.frame(model.matrix(~ pd$CellType - 1))
+colnames(phenoDF) <- sub("^pd\\$CellType", "", colnames(phenoDF))
+
+# this is the code that generates the model coefficients
+if (ncol(phenoDF) == 2) {
+    # two group solution
+    X <- as.matrix(phenoDF)
+    coefEsts <- t(solve(t(X) %*% X) %*% t(X) %*% t(p))
+} else {
+    # greater than 2 groups solution
+    tmp <- validationCellType(Y = p, pheno = phenoDF, modelFix = form)
+    coefEsts <- tmp$coefEsts
+}
+
+# return value format
+list(
+  coefEsts = coefEsts,
+  compTable = compTable,
+  sampleMeans = pMeans
+)
+```
+
+## validationCellType
+
+This appears to be the internal function that generates the coefficient tables that are familiar. 
+
+Relevant inputs:
+1. `Y` - the beta values of probes that have been selected as "informative" by pickCompProbes 
+2. `pheno` - the design matrix that encodes the parameters (i.e. the cell types) that result in the output (i.e. the beta values for a probe). Note that since the wrapper function for this (`pickCompProbes`) is run only on a REFERENCE RGChannelSet in the original implementation, I believe the expectation is for the design matrix to essentially be one-hot encoded for the relevant cell types per sample.
+3. `modelFix` - the formula that should be used in conjunction with pheno to predict the probe beta values depending on the a priori known cell compositions for each sample
+
+### params
+
+```{r}
+# p should be the REFERENCE beta values (in the context of pickCompProbes)
+Y = p
+
+# phenoDF is the design matrix that encodes the parameters that are used to predict the observed beta values for each probe
+pheno = phenoDF
+
+# the formula that should be used in conjunction with pheno to predict the probe beta values depending on the a priori known cell compositions for each sample
+modelFix = form
+
+# these are never set by pickCompProbes, they were probably used for internal development or use of pickCompProbes elsewhere in the minfi package
+modelBatch = NULL
+L.forFstat = NULL
+verbose = FALSE
+```
+
+### code
+
+```{r}
+# N is the number samples
+N <- dim(pheno)[1]
+
+# add the intercept to the design matrix
+pheno$y <- rep(0, N)
+
+# create a design matrix with the formula: `y ~ linear combination of cell type fractions`
+# use the phenotype data as input, i.e. the labeled cell type for each sample
+xTest <- model.matrix(modelFix, pheno)
+sizeModel <- dim(xTest)[2]
+
+# these are the dimensions of the probes used to generate the deconvolution model coefficients
+M <- dim(Y)[1]
+
+if (is.null(L.forFstat)) {
+  # NOTE: All non-intercept coefficients
+  # TODO: the code as written doesn't seem like it's doing what's expected? if we're trying to eliminate the intercept, it looks like it's already not included. what this appears to do instead is eliminate the first row of the 
+  L.forFstat <- diag(sizeModel)[-1,]
+  colnames(L.forFstat) <- colnames(xTest)
+  rownames(L.forFstat) <- colnames(xTest)[-1]
+}
+
+# Initialize various containers
+sigmaResid <- sigmaIcept <- nObserved <- nClusters <- Fstat <- Fstat_all <- rep(NA, M)
+coefEsts <- matrix(NA, M, sizeModel)
+coefVcovs <- list()
+
+# Loop over each CpG
+for (j in seq_len(M)) {
+  # Remove missing methylation values
+  # essentially, if a beta value for a probe in a particular sample is missing, don't use the probe for that sample when fitting the model for how a probe can inform the distribution of cell types
+  ii <- !is.na(Y[j, ])
+  nObserved[j] <- sum(ii)
+  
+  # add the beta values from the jth informative probe to the design matrix
+  pheno$y <- Y[j,]
+
+  if (j %% round(M / 10) == 0 && verbose) cat(".") # Report progress
+
+  # Try to fit a mixed model to adjust for plate
+  try({
+      if (!is.null(modelBatch)) {
+          fit <- try(
+              nlme::lme(modelFix, random = modelBatch, data = pheno[ii, ]))
+          # NOTE: If LME can't be fit, just use OLS
+          OLS <- inherits(fit, "try-error")
+      } else {
+          OLS <- TRUE
+      }
+
+      if (OLS) {
+          fit <- stats::lm(modelFix, data = pheno[ii, ])
+          fitCoef <- fit$coef
+          sigmaResid[j] <- summary(fit)$sigma
+          sigmaIcept[j] <- 0
+          nClusters[j] <- 0
+      } else {
+          fitCoef <- fit$coef$fixed
+          sigmaResid[j] <- fit$sigma
+          sigmaIcept[j] <- sqrt(getVarCov(fit)[1])
+          nClusters[j] <- length(fit$coef$random[[1]])
+      }
+      coefEsts[j,] <- fitCoef
+      coefVcovs[[j]] <- vcov(fit)
+
+      useCoef <- L.forFstat %*% fitCoef
+      useCoef_all <- L.forFstat_all %*% fitCoef
+      
+      useV <- L.forFstat %*% coefVcovs[[j]] %*% t(L.forFstat)
+      useV_all <- L.forFstat_all %*% coefVcovs[[j]] %*% t(L.forFstat_all)
+      
+      Fstat[j] <- (t(useCoef) %*% solve(useV, useCoef)) / sizeModel
+      Fstat_all[j] <- (t(useCoef) %*% solve(useV, useCoef)) / sizeModel
+  })
+}
+if (verbose) cat(" done\n")
+
+# Name the rows so that they can be easily matched to the target data set
+rownames(coefEsts) <- rownames(Y)
+colnames(coefEsts) <- names(fitCoef)
+degFree <- nObserved - nClusters - sizeModel + 1
+
+# Get P values corresponding to F statistics
+Pval <- 1 - pf(Fstat, sizeModel, degFree)
+
+# the coefEsts value is what is returned by pickCompProbes and used for cell proportion estimation
+res <- list(
+  coefEsts = coefEsts,
+  coefVcovs = coefVcovs,
+  modelFix = modelFix,
+  modelBatch = modelBatch,
+  sigmaIcept = sigmaIcept,
+  sigmaResid = sigmaResid,
+  L.forFstat = L.forFstat,
+  Pval = Pval,
+  orderFstat = order(-Fstat),
+  Fstat = Fstat,
+  nClusters = nClusters,
+  nObserved = nObserved,
+  degFree = degFree)
+```
+
+### questions
+
+When validationCellTypes generates the diagonal matrix for cell type contributions `L.forFstat`, the comment from the original code is:
+
+```{r}
+# original code
+# original comment: "NOTE: All non-intercept coefficients"
+L.forFstat <- diag(sizeModel)[-1,]
+colnames(L.forFstat) <- colnames(xTest)
+rownames(L.forFstat) <- colnames(xTest)[-1]
+```
+
+which is meant to exclude the y-intercept from the matrix.
+
+However, this doesn't appear to be what's actually happening? Since the inclusion of -1 in the formula implicitly removes the y-intercept, this instead removes one of the cell types from the diagonal matrix. Compare the output of the above code to the below.
+
+```{r}
+# try using a diagonal matrix that doesn't remove any rows
+L.forFstat_all <- diag(sizeModel)
+colnames(L.forFstat_all) <- rownames(L.forFstat_all) <- colnames(xTest)
+
+print(L.forFstat)
+print(L.forFstat_all)
+```
+
+Ultimately, these two matrices appear to end up being used to calculate the F-statistic for the coefficients for each of the CpG probes:
+
+```{r}
+coefEsts[j,] <- fitCoef
+coefVcovs[[j]] <- vcov(fit)
+
+useCoef <- L.forFstat %*% fitCoef
+useCoef_all <- L.forFstat_all %*% fitCoef
+
+useV <- L.forFstat %*% coefVcovs[[j]] %*% t(L.forFstat)
+useV_all <- L.forFstat_all %*% coefVcovs[[j]] %*% t(L.forFstat_all)
+
+Fstat[j] <- (t(useCoef) %*% solve(useV, useCoef)) / sizeModel
+Fstat_all[j] <- (t(useCoef) %*% solve(useV, useCoef)) / sizeModel
+```
+
+which is never used to filter good/bad coefficients/probes from `validationCellType`, nor used in the final output from `pickCompProbes`:
+
+```{r}
+# note the following code chunk is from pickCompProbes
+tmp <- validationCellType(Y = p, pheno = phenoDF, modelFix = form)
+coefEsts <- tmp$coefEsts
+
+# return value format
+list(
+  coefEsts = coefEsts,
+  compTable = compTable,
+  sampleMeans = pMeans
+)
+```
+
+Can likely ignore this as it doesn't have a material impact on the cell proportion coefficients, but something to keep in mind.
+
+# Recapitulation of third trimester data set
+
+The following section requires:
+- a local copy of Victor's raw methylation data (`0_1_rgset_raw.rds`)
+- probe annotations (`1_1_probe_anno.rds`)
+
+## Load Additional Libraries
+
+Some additional libraries need to be available for this section
+
+```{r}
+required_packages <- list(
+  c("FlowSorted.CordBloodCombined.450k", "bioconductor"),
+  c("wvictor14/planet", "github")
+)
+
+for (package in required_packages) {
+  package_name = package[1]
+  source_name = package[2]
+  
+  if ((source_name == "bioconductor") && !requireNamespace(package_name, quietly = TRUE)) {
+    BiocManager::install(package_name)
+  } else if ((source_name == "general") && !requireNamespace(package_name, quietly = TRUE)) {
+    install.packages(package_name)
+  } else if ((source_name == "github") && !requireNamespace(package_name, quietly = TRUE)) {
+    devtools::install_github(package_name)
+  }
+}
+```
+
+
+## Load Data
+
+```{r}
+data("plCellCpGsThird", package = "planet")
+
+victor_rgset_raw <- readRDS(sprintf("%s/transfer/Oct92024_CellsDatafromAmy/0_1_rgset_raw.rds", params$work_dir))
+probe_annotations <- readRDS(sprintf("%s/transfer/Oct92024_CellsDatafromAmy/1_1_probe_anno.rds", params$work_dir))
+pDat <- readRDS(sprintf("%s/transfer/Oct92024_CellsDatafromAmy/2_3_pDat_contam.rds", params$work_dir))
+new_ga <- readRDS(sprintf("%s/transfer/Oct92024_CellsDatafromAmy/0_3_pDat.rds", params$work_dir))
+```
+
+## Get and Pre-process nRBC Data
+
+Additional methylation data set was generated previously to include another cell type into the cell type coefficients
+
+```{r}
+# import cord blood data from ExperimentHub; this is what will be used to get nRBC methylation signal
+cord_blood <- FlowSorted.CordBloodCombined.450k::FlowSorted.CordBloodCombined.450k()
+nrbc <- cord_blood[, pData(cord_blood)$CellType == "nRBC"]
+
+nrbc_noob <- preprocessNoob(nrbc)
+
+nrbc_pDat <- pData(nrbc_noob) %>%
+  as_tibble() %>%
+  dplyr::rename(Tissue = CellType) %>%
+  mutate(Trimester = "Third") %>%
+  select(Sample_Name, Tissue, Trimester, Sex, Study) 
+  
+pData(nrbc_noob) <- DataFrame(nrbc_pDat)
+```
+
+
+## Victor's Data Pre-processing
+
+Adapted the pre-processing steps as outlined in the notebook `1_4_Normalization`
+
+```{r}
+# mset <- minfi::preprocessNoob(victor_rgset_raw)
+
+# optional: save the mset for faster loading next time
+# saveRDS(
+#   object = mset, 
+#   file = sprintf("%s/bin/third_trimester_mset.rds", params$work_dir)
+# )
+mset <- readRDS(sprintf("%s/bin/third_trimester_mset.rds", params$work_dir))
+
+# pull betas
+betas <- minfi::getBeta(mset)
+
+# filtered autosomal probes
+ind_probe_filt <- probe_annotations %>% 
+  filter(remove_XY == F & (remove_failed == F & remove_CH_SNP == F)) %>% 
+  pull(probe_ID)
+
+# filtering betas using probe filter
+betas_filt <- betas[ind_probe_filt,]
+
+# updating phenotype data
+pDat <- pDat %>%
+  mutate(
+    Tissue = case_when(
+      !(Tissue %in% c('Villi', 'Villi maternal', 'Syncytiotrophoblast', 'Mixture')) ~ paste(Tissue, 'cs'),
+      Tissue == 'Syncytiotrophoblast' ~ 'Trophoblasts enz',
+      TRUE ~ Tissue
+    )
+  )
+
+pDat <- pDat %>%
+  # remove old GA
+  select(-GA) %>%
+  
+  # add new GA
+  left_join(
+    new_ga %>% 
+      select(
+        Sample_Name, GA
+      )
+    )
+
+pDat_filt <- pDat %>% 
+  filter(
+    maternal_contamination_norm_flip < 0.35,
+    !Sample_Name %in% c(
+      'PM364_hofb_cs', 
+      'PL293_v_R2', 
+      'PM366_vc_R2', 
+      'P131_hofb_cs', 
+      'PM324_V4', 
+      'PM324_V1', 
+      'PM139_vc', 
+      'PM77_vc'
+    ),
+    !Tissue %in% c(
+      'Villi maternal', 
+      'Trophoblasts enz',
+      'Dead Cells and Lymphocytes cs'),
+    Trimester != 'Second'
+  )
+
+# filter out contaminated samples
+mset_filt <- mset[, pDat_filt$Sentrix]
+betas_filt <- betas_filt[, pDat_filt$Sentrix]
+
+# rename the sample identifiers for columns in the M-set and betas
+# needs to be done after subsetting the betas on the samples available through the phenotype data since Sentrix uses the old sample identifiers
+colnames(mset_filt) <- colnames(betas_filt) <- pDat_filt$Sample_Name
+
+# need to update the associated phenotypic data for the M-set after filtering out bad samples/probes
+pData(mset_filt) <- DataFrame(pDat_filt)
+
+# necessary column for pickCompProbes
+mset$CellType <- mset$Tissue
+
+mset_ref <- mset[, pData(mset)$Tissue %in% c('Trophoblasts', 'Stromal', 'Hofbauer', 'Endothelial')]
+mset_test <- mset[, pData(mset)$Tissue %in% c('Mixture', 'Villi')]
+```
+
+## Combine nRBC with M-set
+
+```{r}
+pData(mset)$Study <- "Yuan"
+mset_combined <- minfi::combineArrays(nrbc_noob, mset)
+
+# adjust phenotype data associated with the combined M-set
+pData(mset_combined) <- pData(mset_combined) %>% as.data.frame() %>%
+  select(Sample_Name, Sex, Trimester, Tissue, Study) %>% 
+  mutate(Tissue = gsub(' cs', '', Tissue),
+         CellType = Tissue) %>% DataFrame()
+```
+
+
+## Get Cell Composition Coefficients
+
+Call `minfi::pickCompProbes` on the generated M-set to generate the cell proportion coefficients. They should match the data that's provided as part of planet.
+
+```{r}
+mset_combined_ref <- mset_combined[
+  , pData(mset_combined)$CellType %in% c(
+    'Trophoblasts', 'Stromal', 'Hofbauer', 'Endothelial', 'nRBC', 'Syncytiotrophoblast'
+  )
+]
+
+probes_third <- minfi:::pickCompProbes(
+  mset_combined_ref[, pData(mset_combined_ref)$Trimester == "Third"], 
+  cellTypes = c('Trophoblasts', 'Stromal', 'Hofbauer', 'Endothelial', 'nRBC', 'Syncytiotrophoblast'),
+  compositeCellType = 'Placenta',
+  probeSelect = "both")
+```
+
+The probes that are generated do not match the probes from Victor's data set
+
+```{r}
+# are there differences in the "informative" probes?
+stopifnot(
+  "There are differences in the informative probes predicted and the probes from the third trimester coefficient set" = 
+  length(
+    setdiff(
+      rownames(probes_third$coefEsts), rownames(plCellCpGsThird)
+    )
+  ) == 0
+)
+```
+
